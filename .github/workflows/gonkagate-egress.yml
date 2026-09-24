@@ -1,0 +1,44 @@
+# GonkaGate egress lane — PUBLIC repo (free unlimited runner minutes)
+# Confidentiality is enforced by design:
+#   - the worker runs the factory with GONKA_QUIET=1 (run logs redacted)
+#   - results are ENVELOPE-ENCRYPTED (AES-256-GCM + RSA-4096) before commit
+#   - plaintext temp files are deleted (see scripts/.gitignore)
+# The public repo only ever contains scripts + ciphertext. Only the local holder
+# of egress-private.pem can decrypt (scripts/decrypt-merge.mjs).
+
+name: gonkagate-egress
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: accounts to create on this runner (keep GENTLE - real $10 grants)
+        required: false
+        default: "8"
+
+permissions:
+  contents: write
+
+jobs:
+  egress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run gonkagate worker (fresh egress IP, encrypted output)
+        run: node scripts/gh-worker-enc.mjs "${{ github.event.inputs.count }}"
+
+      - name: Commit encrypted runner results (ciphertext only)
+        run: |
+          git config user.name "gonkagate-worker"
+          git config user.email "worker@localhost"
+          git add -A
+          git commit -m "egress: encrypted results $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing to commit"
+          git pull --rebase 2>/dev/null || true
+          git push
