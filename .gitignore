@@ -1,0 +1,5 @@
+# NEVER commit plaintext account data. Encrypted artifacts (.jsonl.enc/.key) are safe.
+scripts/*.jsonl
+scripts/*.md
+scripts/.tmp-registry.json
+*.log
