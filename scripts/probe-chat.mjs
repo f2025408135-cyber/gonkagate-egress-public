@@ -28,4 +28,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     } catch (e) { console.log(`CHAT ${m} ERR ${e.message}`); }
     await sleep(2000);
   }
+  // /v1/messages fast path (minimax only to keep it short)
+  try {
+    const t0 = Date.now();
+    const r = await fetch(base + '/messages', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'minimaxai/minimax-m2.7', messages: [{ role: 'user', content: 'Say PONG' }], max_tokens: 8 })
+    });
+    const j = await r.json().catch(() => ({}));
+    console.log(`MSGS minimaxai/minimax-m2.7 HTTP ${r.status} ${Date.now()-t0}ms ${j.content ? 'OK' : (j.error ? (j.error.message||'').slice(0,60) : '?')}`);
+  } catch (e) { console.log(`MSGS minimax ERR ${e.message}`); }
 })();
