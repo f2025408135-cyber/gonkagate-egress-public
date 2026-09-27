@@ -1,0 +1,32 @@
+name: ip-test
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chat probe from fresh IP
+        shell: bash
+        env:
+          KEY: ${{ secrets.GONKA_TEST_KEY }}
+        run: |
+          echo "runner IP check:"
+          curl -s --max-time 10 https://api.ipify.org; echo
+          echo "--- /models ---"
+          curl -s --max-time 20 -H "Authorization: Bearer $KEY" https://api.gonkagate.com/v1/models | head -c 300; echo
+          echo "--- chat deepseek ---"
+          curl -s --max-time 60 -w "\nHTTP_CODE:%{http_code}\nTIME:%{time_total}s\n" \
+            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-ai/deepseek-v4-flash-0731","messages":[{"role":"user","content":"Reply exactly OK"}],"max_tokens":8}' \
+            https://api.gonkagate.com/v1/chat/completions | head -c 600; echo
+          echo "--- chat minimax ---"
+          curl -s --max-time 60 -w "\nHTTP_CODE:%{http_code}\nTIME:%{time_total}s\n" \
+            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+            -d '{"model":"minimaxai/minimax-m2.7","messages":[{"role":"user","content":"Reply exactly OK"}],"max_tokens":8}' \
+            https://api.gonkagate.com/v1/chat/completions | head -c 600; echo
+          echo "--- chat glm ---"
+          curl -s --max-time 90 -w "\nHTTP_CODE:%{http_code}\nTIME:%{time_total}s\n" \
+            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+            -d '{"model":"zai-org/glm-5.3-flash","messages":[{"role":"user","content":"Reply exactly OK"}],"max_tokens":8}' \
+            https://api.gonkagate.com/v1/chat/completions | head -c 600; echo
