@@ -17,6 +17,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const EMAILNATOR_BASE = "https://www.emailnator.com";
+const CATCH_BASE = "https://api.catchmail.io";
+const CATCH_DOMAINS = ["catchmail.io", "mailistry.com", "zeppost.com"];
 const HDRS = {
   "Accept": "application/json",
   "Content-Type": "application/json",
@@ -92,13 +94,52 @@ async function enatorWaitCode(email, tries = 18, gapMs = 10000) {
   return null;
 }
 
+// --- catchmail rail (free public-domain temp mail, fresh per-account origin; avoids the burned dotGmail pool) ---
+async function catchMint() {
+  const local = "rail" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const domain = CATCH_DOMAINS[Math.floor(Math.random() * CATCH_DOMAINS.length)];
+  return local + "@" + domain;
+}
+async function catchList(address) {
+  const r = await fetch(CATCH_BASE + "/api/v1/mailbox?address=" + encodeURIComponent(address));
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => ({}));
+  return (j && j.messages) || [];
+}
+async function catchWaitCode(address, tries = 36, gapMs = 10000) {
+  // catchmail fair-use: 1 req/sec/IP - 10s gap keeps us far under.
+  for (let i = 0; i < tries; i++) {
+    try {
+      const msgs = await catchList(address);
+      const hit = msgs.find((m) => /x\.ai|SpaceXAI|confirmation|verification|verify|grok/i.test((m.from || "") + (m.subject || "")));
+      if (hit) {
+        const b = await fetch(CATCH_BASE + "/api/v1/message/" + encodeURIComponent(hit.id) + "?mailbox=" + encodeURIComponent(address));
+        const bj = await b.json().catch(() => ({}));
+        const text = ((bj && (bj.body?.text || bj.body?.html)) || "") + " " + (hit.subject || "") + " " + (hit.from || "");
+        const m33 = text.match(/(\d{3})[\s-]*(\d{3})/);
+        if (m33) return m33[1] + m33[2];
+        const m6 = text.match(/(?<!\d)(\d{6})(?!\d)/);
+        if (m6) return m6[1];
+      }
+    } catch (e) { /* transient */ }
+    await new Promise((r) => setTimeout(r, gapMs));
+  }
+  return null;
+}
+
 async function clickByText(page, text, { exact = true } = {}) {
   const loc = page.locator("button", { hasText: exact ? text : undefined }).filter({ hasText: text }).first();
   await loc.click({ timeout: 8000 });
 }
 
 async function main() {
-  const [email, password] = process.argv.slice(2);
+  let [email, password] = process.argv.slice(2);
+  const mailIdx = process.argv.indexOf("--mail");
+  const mailRail = mailIdx >= 0 ? process.argv[mailIdx + 1] : "catchmail";
+  if (mailRail === "catchmail") {
+    email = await catchMint();
+    console.log("minted catchmail address:", email);
+  }
   const headed = process.argv.includes("--headed");
   const regIdx = process.argv.indexOf("--registry");
   const registryPath = regIdx >= 0 ? process.argv[regIdx + 1] : null;
@@ -162,7 +203,7 @@ async function main() {
     let code = manualCode;
     if (!code) {
       console.log("waiting for code at", email, "...");
-      code = await enatorWaitCode(email);
+      code = mailRail === "catchmail" ? await catchWaitCode(email) : await enatorWaitCode(email);
       if (!code) { console.error("CODE_TIMEOUT: no x.ai mail arrived"); process.exit(1); }
     }
     console.log("code:", code.slice(0, 3) + "-" + code.slice(3));
