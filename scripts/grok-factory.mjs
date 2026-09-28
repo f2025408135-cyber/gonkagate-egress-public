@@ -19,6 +19,19 @@ import path from "node:path";
 const EMAILNATOR_BASE = "https://www.emailnator.com";
 const CATCH_BASE = "https://api.catchmail.io";
 const CATCH_DOMAINS = ["catchmail.io", "mailistry.com", "zeppost.com"];
+
+// fingerprint rotation — fresh synthetic identity per run (xAI throttles repeated identical fingerprints after ~2 signups)
+const UA_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
+];
+const TZ_POOL = ["Asia/Karachi", "America/New_York", "Europe/London", "Asia/Dubai", "Australia/Sydney"];
+const LANG_POOL = ["en-US", "en-GB", "en-CA", "en-AU"];
+const PLATFORM_POOL = ["Win32", "MacIntel", "Linux x86_64"];
+const CONC_POOL = [4, 8,  16];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const HDRS = {
   "Accept": "application/json",
   "Content-Type": "application/json",
@@ -28,13 +41,13 @@ const HDRS = {
   "Referer": EMAILNATOR_BASE + "/inbox",
 };
 
-const STEALTH = `
+const STEALTH = (plat, conc) => `
 Object.defineProperty(navigator, "webdriver", { get: () => undefined });
 const _qp = navigator.permissions && navigator.permissions.query;
 if (_qp) navigator.permissions.query = (p) => p && p.name === "notifications" ? Promise.resolve({ state: Notification.permission, onchange: null }) : _qp(p);
 try { Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"], configurable: true }); } catch (e) {}
-try { Object.defineProperty(navigator, "platform", { get: () => "Win32", configurable: true }); } catch (e) {}
-try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => 8, configurable: true }); } catch (e) {}
+try { Object.defineProperty(navigator, "platform", { get: () => "${plat}", configurable: true }); } catch (e) {}
+try { Object.defineProperty(navigator, "hardwareConcurrency", { get: () => ${conc}, configurable: true }); } catch (e) {}
 `;
 
 function findChromium() {
@@ -164,12 +177,12 @@ async function main() {
     ],
   });
   const ctx = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    locale: "en-US",
-    viewport: { width: 1280, height: 900 },
-    timezoneId: "Asia/Karachi",
+    userAgent: pick(UA_POOL),
+    locale: pick(LANG_POOL),
+    viewport: { width: 1280 + Math.floor(Math.random() * 160), height: 800 + Math.floor(Math.random() * 160) },
+    timezoneId: pick(TZ_POOL),
   });
-  await ctx.addInitScript(STEALTH);
+  await ctx.addInitScript(STEALTH(pick(PLATFORM_POOL), pick(CONC_POOL)));
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
 
