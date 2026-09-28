@@ -161,6 +161,8 @@ async function main() {
   const registryPath = regIdx >= 0 ? process.argv[regIdx + 1] : null;
   const codeIdx = process.argv.indexOf("--code");
   const manualCode = codeIdx >= 0 ? process.argv[codeIdx + 1] : null;
+  const pollIdx = process.argv.indexOf("--poll");
+  const pollTarget = pollIdx >= 0 ? process.argv[pollIdx + 1] : null;
   if (!email || !password) {
     console.error("usage: node grok-factory.mjs <email> <password> [--headed] [--registry path] [--code NNNNNN]");
     process.exit(1);
@@ -218,8 +220,9 @@ async function main() {
     // 4. get code
     let code = manualCode;
     if (!code) {
-      console.log("waiting for code at", email, "...");
-      code = mailRail === "catchmail" ? await catchWaitCode(email) : await enatorWaitCode(email);
+      const target = pollTarget || email;
+      console.log("waiting for code at", target, "...");
+      code = mailRail === "catchmail" ? await catchWaitCode(target) : await enatorWaitCode(target);
       if (!code) { console.error("CODE_TIMEOUT: no x.ai mail arrived"); process.exit(1); }
     }
     console.log("code:", code.slice(0, 3) + "-" + code.slice(3));
