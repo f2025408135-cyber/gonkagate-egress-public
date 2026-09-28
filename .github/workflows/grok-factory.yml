@@ -1,0 +1,56 @@
+# Grok (xAI) account factory — PUBLIC repo egress lane (free unlimited runner minutes)
+# Confidentiality by design (same doctrine as gonkagate-egress):
+#   - factory runs with --registry pointing at a .tmp file (gitignored)
+#   - grok-enc.mjs envelope-encrypts results (AES-256-GCM + RSA-4096) before commit
+#   - plaintext temp files are deleted by grok-enc.mjs
+# The public repo only ever contains scripts + ciphertext. Only the local holder
+# of egress-private.pem can decrypt (scripts/grok-decrypt.mjs).
+
+name: grok-factory
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: temp email for the new xAI account
+        required: true
+        type: string
+      password:
+        description: password to set for the new xAI account
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  factory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install playwright chromium (stealth browser for accounts.x.ai)
+        run: |
+          npm i playwright-core@1.63.0
+          npx --yes playwright@1.63.0 install --with-deps chromium
+
+      - name: Run grok factory (fresh datacenter IP)
+        run: node scripts/grok-factory.mjs "${{ github.event.inputs.email }}" "${{ github.event.inputs.password }}" --registry scripts/.tmp-grok-registry.json
+
+      - name: Envelope-encrypt runner results (ciphertext only)
+        run: node scripts/grok-enc.mjs scripts/.tmp-grok-registry.json
+
+      - name: Commit encrypted runner results
+        run: |
+          git config user.name "grok-factory-worker"
+          git config user.email "worker@localhost"
+          git add -A
+          git commit -m "grok-factory: results $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing to commit"
+          git pull --rebase 2>/dev/null || true
+          git push
