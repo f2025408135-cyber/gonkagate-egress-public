@@ -148,10 +148,13 @@ async function clickByText(page, text, { exact = true } = {}) {
 async function main() {
   let [email, password] = process.argv.slice(2);
   const mailIdx = process.argv.indexOf("--mail");
-  const mailRail = mailIdx >= 0 ? process.argv[mailIdx + 1] : "catchmail";
+  let mailRail = mailIdx >= 0 ? process.argv[mailIdx + 1] : null;
+  if (!mailRail) mailRail = /@gmail\.com$/i.test(email || "") ? "emailnator" : "catchmail";
   if (mailRail === "catchmail") {
     email = await catchMint();
     console.log("minted catchmail address:", email);
+  } else {
+    console.log("mail rail: emailnator (address supplied)");
   }
   const headed = process.argv.includes("--headed");
   const regIdx = process.argv.indexOf("--registry");
