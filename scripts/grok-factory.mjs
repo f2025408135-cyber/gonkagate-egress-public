@@ -140,8 +140,7 @@ function makePassword() {
   return "Grok!" + randomBytes(9).toString("base64url");
 }
 
-async function deviceFlow(ctx, log) {
-  const cookieHeader = (await ctx.cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
+async function deviceFlow(page, ctx, log) {
   const r = await fetch(`${AUTH}/oauth2/device/code`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -151,18 +150,17 @@ async function deviceFlow(ctx, log) {
   const dc = await r.json();
   log("device code OK, user_code:", dc.user_code);
 
-  // verify → consent page (manual Location follow, cookie header preserved)
+  // verify + consent via the BROWSER's request context (Chrome TLS + browser
+  // cookies → passes Cloudflare; raw node fetch gets a JS challenge)
   let vtext = "";
-  let vr = await fetch(`${AUTH}/oauth2/device/verify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookieHeader },
-    body: new URLSearchParams({ user_code: dc.user_code }).toString(),
-    redirect: "manual",
+  let vr = await page.request.post(`${AUTH}/oauth2/device/verify`, {
+    form: { user_code: dc.user_code },
+    maxRedirects: 0,
   });
-  if (vr.status >= 300 && vr.status < 400) {
-    const loc = vr.headers.get("location");
+  if (vr.status() >= 300 && vr.status() < 400) {
+    const loc = vr.headers()["location"];
     if (!loc) throw new Error("verify redirect missing location");
-    const cr = await fetch(new URL(loc, `${AUTH}/`).toString(), { headers: { Cookie: cookieHeader } });
+    const cr = await page.request.get(new URL(loc, `${AUTH}/`).toString());
     vtext = await cr.text();
   } else {
     vtext = await vr.text();
@@ -174,18 +172,12 @@ async function deviceFlow(ctx, log) {
   }
   log("consent_token captured");
 
-  const ar = await fetch(`${AUTH}/oauth2/device/approve`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Cookie: cookieHeader,
-      Origin: "https://accounts.x.ai",
-      Referer: "https://accounts.x.ai/oauth2/device/consent",
-    },
-    body: new URLSearchParams({ user_code: dc.user_code, principal_type: "User", principal_id: "", consent_token: mct[1], action: "allow" }).toString(),
-    redirect: "manual",
+  const ar = await page.request.post(`${AUTH}/oauth2/device/approve`, {
+    form: { user_code: dc.user_code, principal_type: "User", principal_id: "", consent_token: mct[1], action: "allow" },
+    headers: { Origin: "https://accounts.x.ai", Referer: "https://accounts.x.ai/oauth2/device/consent" },
+    maxRedirects: 0,
   });
-  log("approve status:", ar.status);
+  log("approve status:", ar.status());
 
   let token = null;
   for (let i =  0; i < 40; i++) {
@@ -378,7 +370,7 @@ async function main() {
     if (!authed) throw new Error("NO_AUTH: sign-in did not establish a session for " + email);
 
     // ---- 5. device-flow OAuth mint ----
-    const token = await deviceFlow(ctx, log);
+    const token = await deviceFlow(page, ctx, log);
     log("TOKEN OK access:", token.access_token.length, "refresh:", token.refresh_token ? token.refresh_token.length : 0, "expires_in:", token.expires_in);
 
     // ---- 6. registry ----
