@@ -53,5 +53,9 @@ jobs:
           git config user.email "worker@localhost"
           git add -A
           git commit -m "grok-factory: results $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing to commit"
-          git pull --rebase 2>/dev/null || true
-          git push
+          for i in 1 2 3 4 5; do
+            git pull --rebase 2>/dev/null || true
+            if git push; then echo "push ok (attempt $i)"; break; fi
+            echo "push failed (attempt $i) — retrying"
+            sleep 5
+          done
