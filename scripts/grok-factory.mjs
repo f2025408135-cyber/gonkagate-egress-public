@@ -352,7 +352,7 @@ async function main() {
   page.setDefaultTimeout(15000);
 
   try {
-    const enc = encodeURIComponent(email);
+    let enc = encodeURIComponent(email);
     // pre-snapshot inbox to skip stale codes (track message IDs; retry transient list failures)
     const seen = new Set();
     for (let s = 0; s < 3; s++) {
@@ -549,7 +549,7 @@ async function main() {
     process.exit(0);
   } catch (e) {
     console.error("ERROR:", e.message);
-    try { await browser.close(); } catch {}
+    try { await Promise.race([browser.close(), new Promise((r) => setTimeout(r, 5000))]); } catch {}
     process.exit(1);
   }
 }
