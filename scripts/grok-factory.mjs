@@ -169,13 +169,14 @@ async function deviceFlow(page, ctx, log) {
   log("device page1:", b.replace(/\s+/g, " ").slice(0, 180));
   const c4 = await clickAny(page, ["continue", "next", "authorize"]);
   log("device click1:", c4);
-  await page.waitForTimeout(6000);
+await page.waitForTimeout(6000);
   b = await bodyText(page);
   if (/second factor|verify your account|authenticator app|\bADM\b|Google Authenticator|KeePass/i.test(b)) {
-    // MFA wall on consent — log the FULL page text to learn whether the sso
-    // session bypasses it; still attempt the Allow click + token poll below.
-    log("MFA_WALL on consent page — full text:", b.replace(/\s+/g, " ").slice(0, 400));
-    // some accounts may offer EMAIL-based 2FA → code lands in the inbox
+    // consent-page MFA wall — 2FA step-up that the sso session does NOT satisfy for
+    // this account (observed ~1/3 of pool). Not solvable without the TOTP seed →
+    // fail FAST (skip the 200s token-poll waste) unless email-2FA is offered.
+
+    log("MFA_WALL on consent page — 2FA step-up required; text:", b.replace(/\s+/g, " ").slice(0, 240));
     const e2 = await clickAny(page, ["email", "send code to email", "verify by email", "use email"]);
     if (e2) {
       log("clicked email-2FA option:", e2);
@@ -190,16 +191,43 @@ async function deviceFlow(page, ctx, log) {
       } else {
         log("no email-2FA code arrived");
       }
+    } else {
+      throw new Error("MFA_ACCOUNT: consent demands 2FA (unsolvable)");
     }
   }
-  const c5 = await clickAny(page, ["allow", "authorize", "approve", "yes", "continue"]);
+  log("consent page:", b.replace(/\s+/g, " ").slice(0, 220));
+  let c5 = await clickAny(page, ["allow", "authorize", "approve"]);
   log("device click2:", c5);
-  if (!c5) log("consent page sample:", b.replace(/\s+/g, " ").slice(0, 240));
-  await page.waitForTimeout(5000);
+  // completion detection + allow retry (the approve POST occasionally races/
+  // fails silently → grant never registers; re-click submits again)
+  let completed = false;
+  for (let attempt =  0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await page.waitForTimeout(8000);
+      c5 = await clickAny(page, ["allow", "authorize", "approve"]);
+      log("device click2 retry:", attempt + 1, c5);
+    } else {
+      await page.waitForTimeout(10000);
+    }
+    b = await bodyText(page);
+    log("post-consent sample:", b.replace(/\s+/g, " ").slice(0, 160));
+    if (/you can close this window|signed in|approved|successful|complete/i.test(b)) { completed = true; break; }
+    if (/enter the code shown/i.test(b)) {
+      // re-auth: page bounced back to the code entry — click continue again
+      const cc = await clickAny(page, ["continue", "next", "authorize"]);
+      log("re-auth continue:", cc);
+      await page.waitForTimeout(6000);
+      b = await bodyText(page);
+      if (/second factor/i.test(b)) throw new Error("MFA_ACCOUNT: re-auth demands 2FA");
+      continue;
+
+    }
+  }
+  if (!completed) log("CONSENT_INCOMPLETE — polling anyway (grant may still register)");
 
   // token poll (node fetch fine here — no CF on /oauth2/token)
   let token = null;
-  for (let i =  0; i < 40; i++) {
+  for (let i =  0; i < 60; i++) {
     const tr = await fetch(`${AUTH}/oauth2/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
