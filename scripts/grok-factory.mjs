@@ -353,9 +353,9 @@ async function main() {
 
   try {
     const enc = encodeURIComponent(email);
-    // pre-snapshot inbox to skip stale codes
+    // pre-snapshot inbox to skip stale codes (track message IDs)
     const seen = new Set();
-    try { for (const m of await enatorList(email)) if (m.subject) seen.add(m.subject); } catch {}
+    try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); } catch {}
 
     // ---- 1. reset-password rail (auto-sends code) ----
     await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -395,42 +395,57 @@ async function main() {
       log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
     }
 
-    // ---- 2. wait for + enter code (retry loop: stale/slow/absent codes) ----
+    // ---- 2. CODE-CATCH loop: xAI queue-delays code emails (observed ~3min to
+//        hours under volume). Poll the inbox every 30s; if nothing after ~3min
+//        re-trigger the reset send; use the code the instant it lands (codes
+//        expire within ~10-15min of SEND, so catching fast = the whole game). ----
     let code = null;
-    let codeOk = false;
-    for (let attempt = 1; attempt <= 3 && !codeOk; attempt++) {
-      code = manualCode || (await enatorWaitCode(email, attempt === 1 ? 30 : 12, 10000, seen));
-      if (!code) {
-        log("code wait timed out (attempt " + attempt + ") — resending");
-        await clickAny(page, ["resend", "send again", "resend code"]);
-        await page.waitForTimeout(4000);
-        if (!/verify your email/i.test(await bodyText(page))) {
-          await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-          await page.waitForTimeout(8000);
+    if (manualCode) {
+      code = manualCode;
+      log("using manual code:", code);
+    } else {
+      const t0 = Date.now();
+      let sends = 0;
+      const triggerSend = async () => {
+        sends++;
+        log("re-trigger reset send #" + sends);
+        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+      };
+      await triggerSend();
+      for (let i = 0; i < 60; i++) { // 30s ticks, up to ~30 min
+        const msgs = await enatorList(email).catch(() => []);
+        for (const m of msgs) {
+          if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
+          const key = m.id || m.subject;
+          if (seen.has(key)) continue;
+          const mm = (m.subject || "").match(/(\d{3})[\s-]*(\d{3})/);
+          if (mm) { seen.add(key); code = mm[1] + mm[2]; break; }
         }
-        continue;
+        if (code) break;
+        if (i > 0 && i % 6 === 0) await triggerSend(); // every ~3 min
+        await new Promise((r) => setTimeout(r, 30000));
       }
-      log("code:", code.slice(0, 3) + "-" + code.slice(3));
-      const codeInput = page.locator("input[name=code]").first();
-      if (await codeInput.count()) await codeInput.fill(code);
-      else await page.locator("input").last().fill(code);
-      await page.waitForTimeout(500);
-      const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
-      log("clicked code-continue:", c1);
-      await page.waitForTimeout(7000);
-      b = await bodyText(page);
-      log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
-      if (!/verify your email|enter it below|invalid code/i.test(b)) { codeOk = true; break; }
-      log("code not accepted / page stuck on verify (attempt " + attempt + ") — resend + retry");
-      const rc = await clickAny(page, ["resend", "send again", "resend code"]);
-      log("resend click:", rc);
-      await page.waitForTimeout(4000);
-      if (!rc) {
-        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await page.waitForTimeout(8000);
-      }
+      log("code caught after", Math.round((Date.now() - t0) / 1000), "s (sends:", sends, ")");
     }
-    if (!codeOk) { console.error("CODE_TIMEOUT: no valid x.ai code for " + email); process.exit(1); }
+    if (!code) { console.error("CODE_TIMEOUT: no code caught in ~30 min for " + email); process.exit(1); }
+    log("code:", code.slice(0, 3) + "-" + code.slice(3));
+    const codeInput = page.locator("input[name=code]:enabled").first();
+    if (await codeInput.count()) await codeInput.fill(code);
+    else {
+      const anyIn = page.locator("input:not([disabled]):not([type=hidden])").last();
+      await anyIn.fill(code).catch(() => {});
+    }
+    await page.waitForTimeout(500);
+    const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
+    log("clicked code-continue:", c1);
+    await page.waitForTimeout(7000);
+    b = await bodyText(page);
+    log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
+    if (/verify your email|enter it below|invalid code/i.test(b)) {
+      console.error("CODE_REJECTED (expired between catch and submit) — rerun needed for " + email);
+      process.exit(1);
+    }
 
     // ---- 3. set new password ----
     if (/password/i.test(b)) {
