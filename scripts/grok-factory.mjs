@@ -356,15 +356,15 @@ async function main() {
     // pre-snapshot inbox: dedup by CODE VALUE (emailnator message ids change every
 // query, so id-based seen is useless). Parse existing code subjects into seen.
     const seen = new Set();
-    for (let s = 0; s < 3; s++) {
+    for (let s = 0; s < 5; s++) {
       try {
         for (const m of await enatorList(email)) {
           const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
           if (mm) seen.add(mm[1] + mm[2]);
         }
-        break;
+        if (seen.size > 0) break;
       } catch {}
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 3000));
     }
     log("pre-snapshot: " + seen.size + " existing xai codes known");
 
@@ -434,6 +434,7 @@ async function main() {
         await page.waitForTimeout(3000);
       };
       await triggerSend();
+      const warmUntil = Date.now() + 60000; // 60s warm-up: codes this fast are pre-existing stales
       for (let i = 0; i < 18; i++) { // 30s ticks, ~9 min per inbox
         const msgs = await enatorList(email).catch(() => []);
         for (const m of msgs) {
@@ -442,7 +443,9 @@ async function main() {
           if (!mm) continue;
           const cv = mm[1] + mm[2];
           if (seen.has(cv)) continue;
-          seen.add(cv); code = cv; break;
+          seen.add(cv);
+          if (Date.now() < warmUntil) continue; // too fast = stale; skip submission
+          code = cv; break;
         }
         if (code) break;
         if (i > 0 && i % 6 === 0) await triggerSend(); // every ~3 min
@@ -452,14 +455,15 @@ async function main() {
     }
     if (!code) { console.error("CODE_TIMEOUT: no code caught in 3 inbox cycles for " + email); process.exit(1); }
     log("code:", code.slice(0, 3) + "-" + code.slice(3));
-    // ---- submit code (retry once if stale/rejected: re-catch a FRESH code) ----
+    // ---- submit code (retry up to 4×: stale codes exhaust, then fresh lands) ----
     let codeOk = false;
-    for (let attempt = 0; attempt < 2 && !codeOk; attempt++) {
+    for (let attempt = 0; attempt < 4 && !codeOk; attempt++) {
       if (attempt > 0) {
         log("previous code rejected — re-entering catch for a fresh code");
         await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
         await page.waitForTimeout(3000);
         const t1 = Date.now();
+        const warmUntil = Date.now() + 60000;
         code = null;
         for (let i = 0; i < 18 && !code; i++) {
           const msgs = await enatorList(email).catch(() => []);
@@ -469,7 +473,9 @@ async function main() {
             if (!mm) continue;
             const cv = mm[1] + mm[2];
             if (seen.has(cv)) continue;
-            seen.add(cv); code = cv; break;
+            seen.add(cv);
+            if (Date.now() < warmUntil) continue; // too fast = stale
+            code = cv; break;
           }
           if (code) break;
           if (i > 0 && i % 6 === 0) {
@@ -495,7 +501,7 @@ async function main() {
       log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
       codeOk = !/verify your email|enter it below|invalid code/i.test(b);
     }
-    if (!codeOk) throw new Error("CODE_REJECTED_TWICE: no valid code for " + email);
+    if (!codeOk) throw new Error("CODE_REJECTED_X4: no valid code for " + email);
 
     // ---- 3. set new password ----
     if (/password/i.test(b)) {
