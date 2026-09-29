@@ -353,12 +353,20 @@ async function main() {
 
   try {
     let enc = encodeURIComponent(email);
-    // pre-snapshot inbox to skip stale codes (track message IDs; retry transient list failures)
+    // pre-snapshot inbox: dedup by CODE VALUE (emailnator message ids change every
+// query, so id-based seen is useless). Parse existing code subjects into seen.
     const seen = new Set();
     for (let s = 0; s < 3; s++) {
-      try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); break; } catch {}
+      try {
+        for (const m of await enatorList(email)) {
+          const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
+          if (mm) seen.add(mm[1] + mm[2]);
+        }
+        break;
+      } catch {}
       await new Promise((r) => setTimeout(r, 2000));
     }
+    log("pre-snapshot: " + seen.size + " existing xai codes known");
 
     // ---- 1+2. RESET RAIL + CODE-CATCH with REMINT cycles: xAI queue-delays
 //        code emails (~3min to hours). Poll inbox every 30s, re-trigger send
@@ -372,7 +380,7 @@ async function main() {
         email = await enatorGen();
         enc = encodeURIComponent(email);
         seen.clear();
-        try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); } catch {}
+        try { for (const m of await enatorList(email)) { const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/); if (mm) seen.add(mm[1] + mm[2]); } } catch {}
         log("RE-MINT cycle " + cycle + ":", email);
         await page.goto("https://accounts.x.ai/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
         await page.waitForTimeout(2000);
@@ -430,10 +438,11 @@ async function main() {
         const msgs = await enatorList(email).catch(() => []);
         for (const m of msgs) {
           if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
-          const key = m.id || m.subject;
-          if (seen.has(key)) continue;
-          const mm = (m.subject || "").match(/(\d{3})[\s-]*(\d{3})/);
-          if (mm) { seen.add(key); code = mm[1] + mm[2]; break; }
+          const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
+          if (!mm) continue;
+          const cv = mm[1] + mm[2];
+          if (seen.has(cv)) continue;
+          seen.add(cv); code = cv; break;
         }
         if (code) break;
         if (i > 0 && i % 6 === 0) await triggerSend(); // every ~3 min
@@ -456,10 +465,11 @@ async function main() {
           const msgs = await enatorList(email).catch(() => []);
           for (const m of msgs) {
             if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
-            const key = m.id || m.subject;
-            if (seen.has(key)) continue;
-            const mm = (m.subject || "").match(/(\d{3})[\s-]*(\d{3})/);
-            if (mm) { seen.add(key); code = mm[1] + mm[2]; break; }
+            const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
+            if (!mm) continue;
+            const cv = mm[1] + mm[2];
+            if (seen.has(cv)) continue;
+            seen.add(cv); code = cv; break;
           }
           if (code) break;
           if (i > 0 && i % 6 === 0) {
