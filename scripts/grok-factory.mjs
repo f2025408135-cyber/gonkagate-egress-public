@@ -131,8 +131,9 @@ async function bodyText(page) {
   try { return (await page.locator("body").innerText()) || ""; } catch { return ""; }
 }
 
-function hasSso(ctx) {
-  return (ctx.cookies() || []).some((c) => ["sso", "x-userid", "sso-rw"].includes(c.name));
+async function hasSso(ctx) {
+  const cks = await ctx.cookies().catch(() => []);
+  return (cks || []).some((c) => ["sso", "x-userid", "sso-rw"].includes(c.name);
 }
 
 function makePassword() {
@@ -310,7 +311,7 @@ async function main() {
     // ---- 4. session: auto via reset OR sign-in fallback ----
     let authed = false;
     await page.waitForTimeout(4000);
-    if (hasSso(ctx)) {
+    if (await hasSso(ctx)) {
       authed = true;
       log("session auto-established after reset (sso cookie present)");
     }
@@ -339,7 +340,7 @@ async function main() {
         log("login fallback:", r3);
       }
       for (let i = 0; i < 30; i++) {
-        if (hasSso(ctx)) { authed = true; break; }
+        if (await hasSso(ctx)) { authed = true; break; }
         const u = await page.evaluate("location.href").catch(() => "");
         if (/grok\.com/.test(String(u))) { authed = true; break; }
         await page.waitForTimeout(2000);
