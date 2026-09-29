@@ -140,7 +140,8 @@ function makePassword() {
   return "Grok!" + randomBytes(9).toString("base64url");
 }
 
-async function deviceFlow(page, ctx, log) {
+async function deviceFlow(ctx, log) {
+  const cookieHeader = (await ctx.cookies()).map((c) => `${c.name}=${c.value}`).join("; ");
   const r = await fetch(`${AUTH}/oauth2/device/code`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -149,18 +150,45 @@ async function deviceFlow(page, ctx, log) {
   if (!r.ok) throw new Error("device/code " + r.status + " " + (await r.text()).slice(0, 200));
   const dc = await r.json();
   log("device code OK, user_code:", dc.user_code);
-  await page.goto(dc.verification_uri_complete, { waitUntil: "domcontentloaded", timeout: 45000 });
-  await page.waitForTimeout(12000);
-  const b1 = (await bodyText(page)).slice(0, 200);
-  log("device page1:", b1.replace(/\s+/g, " "));
-  const c4 = await clickAny(page, ["continue", "next", "authorize"]);
-  log("device click1:", c4);
-  await page.waitForTimeout(6000);
-  const c5 = await clickAny(page, ["allow", "authorize", "approve", "continue", "yes"]);
-  log("device click2:", c5);
-  await page.waitForTimeout(6000);
+
+  // verify → consent page (manual Location follow, cookie header preserved)
+  let vtext = "";
+  let vr = await fetch(`${AUTH}/oauth2/device/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookieHeader },
+    body: new URLSearchParams({ user_code: dc.user_code }).toString(),
+    redirect: "manual",
+  });
+  if (vr.status >= 300 && vr.status < 400) {
+    const loc = vr.headers.get("location");
+    if (!loc) throw new Error("verify redirect missing location");
+    const cr = await fetch(new URL(loc, `${AUTH}/`).toString(), { headers: { Cookie: cookieHeader } });
+    vtext = await cr.text();
+  } else {
+    vtext = await vr.text();
+  }
+  const mct = vtext.match(/name="consent_token" value="([^"]+)"/);
+  if (!mct) {
+    log("NO consent_token in verify response; body sample:", vtext.replace(/\s+/g, " ").slice(0, 220));
+    throw new Error("no consent_token (verify/consent failed)");
+  }
+  log("consent_token captured");
+
+  const ar = await fetch(`${AUTH}/oauth2/device/approve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: cookieHeader,
+      Origin: "https://accounts.x.ai",
+      Referer: "https://accounts.x.ai/oauth2/device/consent",
+    },
+    body: new URLSearchParams({ user_code: dc.user_code, principal_type: "User", principal_id: "", consent_token: mct[1], action: "allow" }).toString(),
+    redirect: "manual",
+  });
+  log("approve status:", ar.status);
+
   let token = null;
-  for (let i = 0; i < 40; i++) {
+  for (let i =  0; i < 40; i++) {
     const tr = await fetch(`${AUTH}/oauth2/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -350,7 +378,7 @@ async function main() {
     if (!authed) throw new Error("NO_AUTH: sign-in did not establish a session for " + email);
 
     // ---- 5. device-flow OAuth mint ----
-    const token = await deviceFlow(page, ctx, log);
+    const token = await deviceFlow(ctx, log);
     log("TOKEN OK access:", token.access_token.length, "refresh:", token.refresh_token ? token.refresh_token.length : 0, "expires_in:", token.expires_in);
 
     // ---- 6. registry ----
