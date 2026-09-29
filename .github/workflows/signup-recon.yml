@@ -1,0 +1,23 @@
+# Signup recon — validate OAuth/geo/captcha walls from a fresh runner IP.
+# Public-safe: no secrets, read-only fetches.
+
+name: signup-recon
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run signup recon
+        run: node scripts/signup-recon.mjs
