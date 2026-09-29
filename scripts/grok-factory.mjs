@@ -357,53 +357,63 @@ async function main() {
     const seen = new Set();
     try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); } catch {}
 
-    // ---- 1. reset-password rail (auto-sends code) ----
-    await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForTimeout(10000);
-    let b = await bodyText(page);
-    log("reset page:", b.replace(/\s+/g, " ").slice(0, 160));
-    if (/you have been blocked|attention required/i.test(b)) { console.error("BLOCKED: Cloudflare block page"); process.exit(4); }
-    if (/too many code requests/i.test(b)) {
-      log("RATE_LIMITED — waiting 60s then retrying send");
-      await page.waitForTimeout(60000);
-      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForTimeout(10000);
-      b = await bodyText(page);
-      log("reset page after wait:", b.replace(/\s+/g, " ").slice(0, 160));
-    }
-    if (/no account|doesn't exist|not found|invalid email/i.test(b)) {
-      log("EMAIL NOT REGISTERED — doing signup step first");
-      await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForTimeout(10000);
-      await clickAny(page, ["sign up with email"]);
-      await page.waitForTimeout(3000);
-      await page.locator("input[type=email], input[name=email]").first().fill(email);
-      await page.waitForTimeout(500);
-      await clickAny(page, ["sign up"]);
-      await page.waitForTimeout(8000);
-      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForTimeout(10000);
-      b = await bodyText(page);
-      log("reset page after signup:", b.replace(/\s+/g, " ").slice(0, 160));
-    }
-    // if it didn't auto-send (turnstile gating), click the send button
-    if (!/verify your email|code/i.test(b)) {
-      const c = await clickAny(page, ["reset password", "send reset code", "send code", "continue"]);
-      log("trigger send click:", c);
-      await page.waitForTimeout(8000);
-      b = await bodyText(page);
-      log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
-    }
-
-    // ---- 2. CODE-CATCH loop: xAI queue-delays code emails (observed ~3min to
-//        hours under volume). Poll the inbox every 30s; if nothing after ~3min
-//        re-trigger the reset send; use the code the instant it lands (codes
-//        expire within ~10-15min of SEND, so catching fast = the whole game). ----
+    // ---- 1+2. RESET RAIL + CODE-CATCH with REMINT cycles: xAI queue-delays
+//        code emails (~3min to hours). Poll inbox every 30s, re-trigger send
+//        every ~3min, use the code the instant it lands (codes expire ~10-15min
+//        after SEND). ~50% of recycled emailnator inboxes are DEAD (Google
+//        spam-files xAI mail) → abandon after ~9min and remint a fresh inbox. ----
     let code = null;
-    if (manualCode) {
-      code = manualCode;
-      log("using manual code:", code);
-    } else {
+    let b = "";
+    for (let cycle = 1; cycle <= 3 && !code; cycle++) {
+      if (cycle > 1) {
+        email = await enatorGen();
+        enc = encodeURIComponent(email);
+        seen.clear();
+        try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); } catch {}
+        log("RE-MINT cycle " + cycle + ":", email);
+        await page.goto("https://accounts.x.ai/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+      }
+      // ---- reset rail ----
+      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(10000);
+      b = await bodyText(page);
+      log("reset page:", b.replace(/\s+/g, " ").slice(0, 160));
+      if (/you have been blocked|attention required/i.test(b)) { console.error("BLOCKED: Cloudflare block page"); process.exit(4); }
+      if (/too many code requests/i.test(b)) {
+        log("RATE_LIMITED — waiting 60s then retrying send");
+        await page.waitForTimeout(60000);
+        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await page.waitForTimeout(10000);
+        b = await bodyText(page);
+        log("reset page after wait:", b.replace(/\s+/g, " ").slice(0, 160));
+      }
+      if (/no account|doesn't exist|not found|invalid email/i.test(b)) {
+        log("EMAIL NOT REGISTERED — doing signup step first");
+        await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+        await page.waitForTimeout(10000);
+        await clickAny(page, ["sign up with email"]);
+        await page.waitForTimeout(3000);
+        await page.locator("input[type=email], input[name=email]").first().fill(email);
+        await page.waitForTimeout(500);
+        await clickAny(page, ["sign up"]);
+        await page.waitForTimeout(8000);
+        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await page.waitForTimeout(10000);
+        b = await bodyText(page);
+        log("reset page after signup:", b.replace(/\s+/g, " ").slice(0, 160));
+      }
+      // if it didn't auto-send (turnstile gating), click the send button
+      if (!/verify your email|code/i.test(b)) {
+        const c = await clickAny(page, ["reset password", "send reset code", "send code", "continue"]);
+        log("trigger send click:", c);
+        await page.waitForTimeout(8000);
+        b = await bodyText(page);
+        log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
+      }
+
+      // ---- code-catch (per inbox, bounded ~9 min / 3 sends) ----
+      if (manualCode) { code = manualCode; log("using manual code:", code); break; }
       const t0 = Date.now();
       let sends = 0;
       const triggerSend = async () => {
@@ -413,7 +423,7 @@ async function main() {
         await page.waitForTimeout(3000);
       };
       await triggerSend();
-      for (let i = 0; i < 60; i++) { // 30s ticks, up to ~30 min
+      for (let i = 0; i < 18; i++) { // 30s ticks, ~9 min per inbox
         const msgs = await enatorList(email).catch(() => []);
         for (const m of msgs) {
           if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
@@ -426,9 +436,9 @@ async function main() {
         if (i > 0 && i % 6 === 0) await triggerSend(); // every ~3 min
         await new Promise((r) => setTimeout(r, 30000));
       }
-      log("code caught after", Math.round((Date.now() - t0) / 1000), "s (sends:", sends, ")");
+      log("cycle " + cycle + " ended: code=" + (code || "NONE") + " in " + Math.round((Date.now() - t0) / 1000) + "s (sends: " + sends + ")");
     }
-    if (!code) { console.error("CODE_TIMEOUT: no code caught in ~30 min for " + email); process.exit(1); }
+    if (!code) { console.error("CODE_TIMEOUT: no code caught in 3 inbox cycles for " + email); process.exit(1); }
     log("code:", code.slice(0, 3) + "-" + code.slice(3));
     const codeInput = page.locator("input[name=code]:enabled").first();
     if (await codeInput.count()) await codeInput.fill(code);
