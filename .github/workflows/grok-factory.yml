@@ -3,8 +3,10 @@
 #   - factory runs with --registry pointing at a .tmp file (gitignored)
 #   - grok-enc.mjs envelope-encrypts results (AES-256-GCM + RSA-4096) before commit
 #   - plaintext temp files are deleted by grok-enc.mjs
+#   - NO password input: the runner generates a random password in-run and encrypts it
+#     into the result artifact — nothing sensitive ever lands in dispatch inputs/logs
 # The public repo only ever contains scripts + ciphertext. Only the local holder
-# of egress-private.pem can decrypt (scripts/grok-decrypt.mjs).
+# of egress-private.pem can decrypt (scripts/grok-decrypt.mjs locally).
 
 name: grok-factory
 
@@ -12,12 +14,8 @@ on:
   workflow_dispatch:
     inputs:
       email:
-        description: temp email for the new xAI account
-        required: true
-        type: string
-      password:
-        description: password to set for the new xAI account
-        required: true
+        description: "temp email (optional — runner mints a fresh dotGmail from its own IP when omitted)"
+        required: false
         type: string
 
 permissions:
@@ -40,8 +38,11 @@ jobs:
           npm i playwright-core@1.63.0
           npx --yes playwright@1.63.0 install --with-deps chromium
 
-      - name: Run grok factory (fresh datacenter IP)
-        run: node scripts/grok-factory.mjs "${{ github.event.inputs.email }}" "${{ github.event.inputs.password }}" --registry scripts/.tmp-grok-registry.json
+      - name: Run grok factory (fresh datacenter IP, reset-rail + device-flow mint)
+        run: |
+          EMAIL_ARG=""
+          if [ -n "${{ github.event.inputs.email }}" ]; then EMAIL_ARG="${{ github.event.inputs.email }}"; fi
+          node scripts/grok-factory.mjs $EMAIL_ARG --registry scripts/.tmp-grok-registry.json
 
       - name: Envelope-encrypt runner results (ciphertext only)
         run: node scripts/grok-enc.mjs scripts/.tmp-grok-registry.json

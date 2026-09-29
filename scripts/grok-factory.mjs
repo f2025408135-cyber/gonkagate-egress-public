@@ -1,26 +1,32 @@
 #!/usr/bin/env node
 /**
- * grok-factory.mjs — create grok.com (accounts.x.ai) accounts via temp mail.
- * Standalone Playwright-core driver, engine-level stealth (featherless-proven).
+ * grok-factory.mjs — create grok.com (accounts.x.ai) accounts via temp mail (v2).
+ * Hardened 2026-09-29 for the 100-account GHA burst:
+ *   - emailnator dotGmail MINTED FROM THE RUNNER IP when no email arg (--new / omit)
+ *   - password GENERATED IN-RUN (random) when omitted — nothing sensitive in dispatch inputs
+ *   - RESET-RAIL claim: reset-password?email=X auto-sends OTP (works on fresh + recycled
+ *     shared-mailbox addresses; NOT suppressed for temp mail like signup OTPs)
+ *   - auto signup-step first if the reset rail reports "no account"
+ *   - session auto-detection after reset (sso cookie) — skips the sign-in turnstile when possible
+ *   - sign-in fallback (login with email → password → wait for sso cookie)
+ *   - DEVICE-FLOW OAuth mint → access_token + refresh_token (usable by grok-cli / bridge)
  *
  * Usage:
- *   node grok-factory.mjs <email> <password> [--headed] [--registry <path>] [--code <manual-code>]
+ *   node grok-factory.mjs [email] [password] [--new] [--headed] [--registry <path>] [--code NNNNNN]
+ * Exit codes: 0 = account created+tokens, 3 = existing/claim-failed, 4 = blocked/captcha, 1 = error/timeout.
  *
- * Flow: sign-up page -> "Sign up with email" -> email -> code (emailnator poll or --code)
- *       -> Confirm -> if fresh: password/name step -> capture SSO -> registry write.
- * Exit codes: 0 = account created, 3 = existing account, 4 = blocked/captcha, 1 = error/timeout.
- *
- * Registry entry: { email, password, sso, cookies, created, model_tier: "basic" }
+ * Registry entry: { email, password, sso, access_token, refresh_token, expires_at, created, model_tier }
  */
 import { chromium } from "playwright-core";
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 const EMAILNATOR_BASE = "https://www.emailnator.com";
-const CATCH_BASE = "https://api.catchmail.io";
-const CATCH_DOMAINS = ["catchmail.io", "mailistry.com", "zeppost.com"];
+const CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"; // grok-cli oauth client
+const SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write";
+const AUTH = "https://auth.x.ai";
 
-// fingerprint rotation — fresh synthetic identity per run (xAI throttles repeated identical fingerprints after ~2 signups)
 const UA_POOL = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
@@ -30,7 +36,7 @@ const UA_POOL = [
 const TZ_POOL = ["Asia/Karachi", "America/New_York", "Europe/London", "Asia/Dubai", "Australia/Sydney"];
 const LANG_POOL = ["en-US", "en-GB", "en-CA", "en-AU"];
 const PLATFORM_POOL = ["Win32", "MacIntel", "Linux x86_64"];
-const CONC_POOL = [4, 8,  16];
+const CONC_POOL = [4, 8, 16];
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const HDRS = {
   "Accept": "application/json",
@@ -61,7 +67,6 @@ function findChromium() {
     "/usr/bin/google-chrome",
   ];
   for (const c of candidates) if (c && fs.existsSync(c)) return c;
-  // glob ms-playwright for any chromium build (win + linux)
   for (const base of [path.join(process.env.LOCALAPPDATA || "", "ms-playwright"), "/home/runner/.cache/ms-playwright", path.join(process.env.HOME || "", ".cache/ms-playwright")]) {
     if (fs.existsSync(base)) {
       for (const d of fs.readdirSync(base)) {
@@ -86,53 +91,20 @@ async function enatorGen() {
 
 async function enatorList(email) {
   const r = await fetch(`${EMAILNATOR_BASE}/api/message-list`, {
-    method: "POST", headers: HDRS, body: JSON.stringify({ email, limit: 20 }),
+    method: "POST", headers: HDRS, body: JSON.stringify({ email, limit: 30 }),
   });
   const d = await r.json();
   return (d && d.messages) || [];
 }
 
-async function enatorWaitCode(email, tries = 18, gapMs = 10000) {
+async function enatorWaitCode(email, tries = 18, gapMs = 10000, seen = new Set()) {
   for (let i = 0; i < tries; i++) {
     try {
       const msgs = await enatorList(email);
-      const hit = msgs.find((m) => /x\.ai|SpaceXAI|confirmation code/i.test((m.from || "") + (m.subject || "")));
+      const hit = msgs.find((m) => /x\.ai|SpaceXAI|confirmation code/i.test((m.from || "") + (m.subject || "")) && !seen.has(m.subject));
       if (hit) {
         const m = (hit.subject || "").match(/(\d{3})[\s-]*(\d{3})/) || (hit.subject || "").match(/(\d{6})/);
         if (m) return m[1] + (m[2] ? m[2] : "");
-      }
-    } catch (e) { /* transient */ }
-    await new Promise((r) => setTimeout(r, gapMs));
-  }
-  return null;
-}
-
-// --- catchmail rail (free public-domain temp mail, fresh per-account origin; avoids the burned dotGmail pool) ---
-async function catchMint() {
-  const local = "rail" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-  const domain = CATCH_DOMAINS[Math.floor(Math.random() * CATCH_DOMAINS.length)];
-  return local + "@" + domain;
-}
-async function catchList(address) {
-  const r = await fetch(CATCH_BASE + "/api/v1/mailbox?address=" + encodeURIComponent(address));
-  if (!r.ok) return [];
-  const j = await r.json().catch(() => ({}));
-  return (j && j.messages) || [];
-}
-async function catchWaitCode(address, tries = 36, gapMs = 10000) {
-  // catchmail fair-use: 1 req/sec/IP - 10s gap keeps us far under.
-  for (let i = 0; i < tries; i++) {
-    try {
-      const msgs = await catchList(address);
-      const hit = msgs.find((m) => /x\.ai|SpaceXAI|confirmation|verification|verify|grok/i.test((m.from || "") + (m.subject || "")));
-      if (hit) {
-        const b = await fetch(CATCH_BASE + "/api/v1/message/" + encodeURIComponent(hit.id) + "?mailbox=" + encodeURIComponent(address));
-        const bj = await b.json().catch(() => ({}));
-        const text = ((bj && (bj.body?.text || bj.body?.html)) || "") + " " + (hit.subject || "") + " " + (hit.from || "");
-        const m33 = text.match(/(\d{3})[\s-]*(\d{3})/);
-        if (m33) return m33[1] + m33[2];
-        const m6 = text.match(/(?<!\d)(\d{6})(?!\d)/);
-        if (m6) return m6[1];
       }
     } catch (e) { /* transient */ }
     await new Promise((r) => setTimeout(r, gapMs));
@@ -145,28 +117,84 @@ async function clickByText(page, text, { exact = true } = {}) {
   await loc.click({ timeout: 8000 });
 }
 
+async function clickAny(page, labels) {
+  for (const label of labels) {
+    try {
+      const btn = page.locator("button", { hasText: label }).first();
+      if (await btn.count()) { await btn.click({ timeout: 5000 }); return label; }
+    } catch (e) { /* try next */ }
+  }
+  return null;
+}
+
+async function bodyText(page) {
+  try { return (await page.textContent("body")) || ""; } catch { return ""; }
+}
+
+function hasSso(ctx) {
+  return (ctx.cookies() || []).some((c) => ["sso", "x-userid", "sso-rw"].includes(c.name));
+}
+
+function makePassword() {
+  return "Grok!" + randomBytes(9).toString("base64url");
+}
+
+async function deviceFlow(page, ctx, log) {
+  const r = await fetch(`${AUTH}/oauth2/device/code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE }).toString(),
+  });
+  if (!r.ok) throw new Error("device/code " + r.status + " " + (await r.text()).slice(0, 200));
+  const dc = await r.json();
+  log("device code OK, user_code:", dc.user_code);
+  await page.goto(dc.verification_uri_complete, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await page.waitForTimeout(12000);
+  const b1 = (await bodyText(page)).slice(0, 200);
+  log("device page1:", b1.replace(/\s+/g, " "));
+  const c4 = await clickAny(page, ["continue", "next", "authorize"]);
+  log("device click1:", c4);
+  await page.waitForTimeout(6000);
+  const c5 = await clickAny(page, ["allow", "authorize", "approve", "continue", "yes"]);
+  log("device click2:", c5);
+  await page.waitForTimeout(6000);
+  let token = null;
+  for (let i = 0; i < 40; i++) {
+    const tr = await fetch(`${AUTH}/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: dc.device_code, client_id: CLIENT_ID }).toString(),
+    });
+    const j = await tr.json().catch(() => ({}));
+    if (j.access_token) { token = j; break; }
+    if (j.error === "authorization_pending") { await new Promise((r) => setTimeout(r, 5000)); continue; }
+    if (j.error === "slow_down") { await new Promise((r) => setTimeout(r, 7000)); continue; }
+    throw new Error("token poll: " + JSON.stringify(j));
+  }
+  if (!token) throw new Error("token poll timeout");
+  return token;
+}
+
 async function main() {
   let [email, password] = process.argv.slice(2);
-  const mailIdx = process.argv.indexOf("--mail");
-  let mailRail = mailIdx >= 0 ? process.argv[mailIdx + 1] : null;
-  if (!mailRail) mailRail = /@gmail\.com$/i.test(email || "") ? "emailnator" : "catchmail";
-  if (mailRail === "catchmail") {
-    email = await catchMint();
-    console.log("minted catchmail address:", email);
-  } else {
-    console.log("mail rail: emailnator (address supplied)");
+  const args = process.argv.slice(2);
+  const headed = args.includes("--headed");
+  const newMode = args.includes("--new");
+  const regIdx = args.indexOf("--registry");
+  const registryPath = regIdx >= 0 ? args[regIdx + 1] : null;
+  const codeIdx = args.indexOf("--code");
+  const manualCode = codeIdx >= 0 ? args[codeIdx + 1] : null;
+  const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+
+  if (!email || newMode) {
+    email = await enatorGen();
+    log("MINTED EMAIL:", email);
   }
-  const headed = process.argv.includes("--headed");
-  const regIdx = process.argv.indexOf("--registry");
-  const registryPath = regIdx >= 0 ? process.argv[regIdx + 1] : null;
-  const codeIdx = process.argv.indexOf("--code");
-  const manualCode = codeIdx >= 0 ? process.argv[codeIdx + 1] : null;
-  const pollIdx = process.argv.indexOf("--poll");
-  const pollTarget = pollIdx >= 0 ? process.argv[pollIdx + 1] : null;
-  if (!email || !password) {
-    console.error("usage: node grok-factory.mjs <email> <password> [--headed] [--registry path] [--code NNNNNN]");
-    process.exit(1);
+  if (!password) {
+    password = makePassword();
+    log("generated random password (in-run)");
   }
+  log("email:", email);
 
   const exe = findChromium();
   if (!exe) { console.error("FATAL: chromium not found (set PW_CHROMIUM)"); process.exit(1); }
@@ -178,6 +206,9 @@ async function main() {
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-dev-shm-usage",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-features=CalculateNativeWinOcclusion",
       "--window-size=1280,900",
     ],
   });
@@ -192,113 +223,141 @@ async function main() {
   page.setDefaultTimeout(15000);
 
   try {
-    // 1. open signup
-    await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+    const enc = encodeURIComponent(email);
+    // pre-snapshot inbox to skip stale codes
+    const seen = new Set();
+    try { for (const m of await enatorList(email)) if (m.subject) seen.add(m.subject); } catch {}
+
+    // ---- 1. reset-password rail (auto-sends code) ----
+    await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(10000);
+    let b = await bodyText(page);
+    log("reset page:", b.replace(/\s+/g, " ").slice(0, 160));
+    if (/you have been blocked|attention required/i.test(b)) { console.error("BLOCKED: Cloudflare block page"); process.exit(4); }
+    if (/too many code requests/i.test(b)) {
+      log("RATE_LIMITED — waiting 60s then retrying send");
+      await page.waitForTimeout(60000);
+      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(10000);
+      b = await bodyText(page);
+      log("reset page after wait:", b.replace(/\s+/g, " ").slice(0, 160));
+    }
+    if (/no account|doesn't exist|not found|invalid email/i.test(b)) {
+      log("EMAIL NOT REGISTERED — doing signup step first");
+      await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(10000);
+      await clickAny(page, ["sign up with email"]);
+      await page.waitForTimeout(3000);
+      await page.locator("input[type=email], input[name=email]").first().fill(email);
+      await page.waitForTimeout(500);
+      await clickAny(page, ["sign up"]);
+      await page.waitForTimeout(8000);
+      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(10000);
+      b = await bodyText(page);
+      log("reset page after signup:", b.replace(/\s+/g, " ").slice(0, 160));
+    }
+    // if it didn't auto-send (turnstile gating), click the send button
+    if (!/verify your email|code/i.test(b)) {
+      const c = await clickAny(page, ["reset password", "send reset code", "send code", "continue"]);
+      log("trigger send click:", c);
+      await page.waitForTimeout(8000);
+      b = await bodyText(page);
+      log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
+    }
+
+    // ---- 2. wait for + enter code ----
+    const code = manualCode || (await enatorWaitCode(email, 18, 10000, seen));
+    if (!code) { console.error("CODE_TIMEOUT: no x.ai mail arrived at " + email); process.exit(1); }
+    log("code:", code.slice(0, 3) + "-" + code.slice(3));
+    const codeInput = page.locator("input[name=code]").first();
+    if (await codeInput.count()) await codeInput.fill(code);
+    else await page.locator("input").last().fill(code);
+    await page.waitForTimeout(500);
+    const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
+    log("clicked code-continue:", c1);
+    await page.waitForTimeout(7000);
+
+    // ---- 3. set new password ----
+    b = await bodyText(page);
+    log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
+    if (/password/i.test(b)) {
+      const pws = await page.locator("input[type=password]").count();
+      await page.locator("input[type=password]").nth(0).fill(password);
+      if (pws >= 2) await page.locator("input[type=password]").nth(1).fill(password);
+      await page.waitForTimeout(500);
+      const c2 = await clickAny(page, ["reset password", "save password", "continue", "submit"]);
+      log("clicked password-save:", c2);
+      await page.waitForTimeout(8000);
+    }
+    b = await bodyText(page);
+    log("post-password page:", b.replace(/\s+/g, " ").slice(0, 200));
+    if (/blocked|authentication failure/i.test(b)) throw new Error("ACCOUNT_BLOCKED: " + email);
+    if (/successful|password.*(reset|changed|updated)|sign in|account/i.test(b)) log("PASSWORD SET OK");
+
+    // ---- 4. session: auto via reset OR sign-in fallback ----
+    let authed = false;
     await page.waitForTimeout(4000);
-    // CF block check
-    const bodyText = await page.textContent("body").catch(() => "");
-    if (/you have been blocked|attention required/i.test(bodyText)) {
-      console.error("BLOCKED: Cloudflare block page");
-      process.exit(4);
+    if (hasSso(ctx)) {
+      authed = true;
+      log("session auto-established after reset (sso cookie present)");
     }
-
-    // 2. email signup
-    await clickByText(page, "Sign up with email");
-    await page.waitForTimeout(2000);
-    await page.locator("input[type=email]").fill(email);
-    await clickByText(page, "Sign up");
-    await page.waitForTimeout(5000);
-
-    // 3. verify page?
-    let h1 = await page.locator("h1").first().textContent().catch(() => "");
-    console.log("step:", h1.trim());
-    if (!/verify your email/i.test(h1 || "")) {
-      console.error("UNEXPECTED: did not reach verify page. h1=" + h1);
-      process.exit(1);
-    }
-
-    // 4. get code
-    let code = manualCode;
-    if (!code) {
-      const target = pollTarget || email;
-      console.log("waiting for code at", target, "...");
-      code = mailRail === "catchmail" ? await catchWaitCode(target) : await enatorWaitCode(target);
-      if (!code) { console.error("CODE_TIMEOUT: no x.ai mail arrived"); process.exit(1); }
-    }
-    console.log("code:", code.slice(0, 3) + "-" + code.slice(3));
-
-    // 5. enter code
-    const codeInput = page.locator("input").last();
-    await codeInput.fill(code);
-    await clickByText(page, "Confirm email");
-    await page.waitForTimeout(6000);
-
-    // 6. outcome
-    h1 = await page.locator("h1").first().textContent().catch(() => "");
-    console.log("outcome:", h1.trim());
-    if (/existing account found/i.test(h1 || "")) {
-      console.error("EXISTING_ACCOUNT");
-      process.exit(3);
-    }
-    if (!/create your password|password|tell us about yourself|create your account/i.test(h1 || "")) {
-      // maybe inline text instead of h1
-      const body = await page.textContent("body").catch(() => "");
-      if (/existing account found/i.test(body)) { console.error("EXISTING_ACCOUNT"); process.exit(3); }
-      if (!/password|first name|last name|birthday|date of birth/i.test(body)) {
-        console.error("UNEXPECTED outcome. body sample: " + body.slice(0, 300));
-        process.exit(1);
+    if (!authed) {
+      log("no sso after reset — doing sign-in");
+      await page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(10000);
+      await clickAny(page, ["login with email"]);
+      await page.waitForTimeout(4000);
+      await page.locator("input[name=email], input[type=email]").first().fill(email);
+      await page.waitForTimeout(500);
+      await clickAny(page, ["next"]);
+      await page.waitForTimeout(6000);
+      await page.locator("input[name=password], input[type=password]").first().fill(password);
+      await page.waitForTimeout(12000); // turnstile auto-solve
+      const c3 = await clickAny(page, ["login"]);
+      log("clicked login:", c3);
+      await page.waitForTimeout(4000);
+      if (!c3) {
+        const r3 = await page.evaluate(`(() => {
+          const els = [...document.querySelectorAll('button, [role=button], input[type=submit]')];
+          const b = els.find(x => (x.innerText || x.value || '').trim().toLowerCase() === 'login');
+          if (b) { b.click(); return 'login-exact2'; }
+          return null;
+        })()`);
+        log("login fallback:", r3);
+      }
+      for (let i = 0; i < 30; i++) {
+        if (hasSso(ctx)) { authed = true; break; }
+        const u = await page.evaluate("location.href").catch(() => "");
+        if (/grok\.com/.test(String(u))) { authed = true; break; }
+        await page.waitForTimeout(2000);
       }
     }
+    log("authed:", authed);
+    if (!authed) throw new Error("NO_AUTH: sign-in did not establish a session for " + email);
 
-    // 7. credentials step: password + optional name/birthday
-    const pw = page.locator("input[type=password]").first();
-    await pw.fill(password);
-    const textInputs = page.locator("input[type=text]");
-    const n = await textInputs.count();
-    if (n >= 1) await textInputs.nth(0).fill("Grok");
-    if (n >= 2) await textInputs.nth(1).fill("User");
-    // birthday selects (month/day/year) if present
-    const selects = page.locator("select");
-    const selCount = await selects.count();
-    if (selCount >= 3) {
-      await selects.nth(0).selectOption({ index: 4 });   // May
-      await selects.nth(1).selectOption({ index: 11 });  // 12
-      await selects.nth(2).selectOption({ value: "1998" }).catch(() => selects.nth(2).selectOption({ index: 25 }));
-    }
-    await page.waitForTimeout(500);
-    // click the final CTA: "Create account" | "Sign up" | "Continue" | "Submit"
-    for (const label of ["Create account", "Sign up", "Continue", "Submit"]) {
-      const btn = page.locator("button", { hasText: label }).first();
-      if (await btn.count()) { await btn.click(); break; }
-    }
-    await page.waitForTimeout(8000);
+    // ---- 5. device-flow OAuth mint ----
+    const token = await deviceFlow(page, ctx, log);
+    log("TOKEN OK access:", token.access_token.length, "refresh:", token.refresh_token ? token.refresh_token.length : 0, "expires_in:", token.expires_in);
 
-    // 8. detect success: URL away from sign-up or session cookie exists
-    const url = page.url();
+    // ---- 6. registry ----
     const cookies = await ctx.cookies();
     const sso = (cookies.find((c) => c.name === "sso") || {}).value || null;
-    const anon = (cookies.find((c) => c.name === "x-anon-userid") || {}).value || null;
-    console.log("final url:", url);
-    console.log("sso cookie:", sso ? sso.slice(0, 20) + "..." : "(none)");
-    if (!sso && !anon) {
-      const body = await page.textContent("body").catch(() => "");
-      if (/existing account found/i.test(body)) { console.error("EXISTING_ACCOUNT"); process.exit(3); }
-      console.error("NO_SESSION: signup may have failed. body sample: " + body.slice(0, 300));
-      process.exit(1);
-    }
-
     const entry = {
-      email, password, sso, anon, url,
-      cookies: cookies.map((c) => ({ name: c.name, value: c.value, domain: c.domain })),
+      email, password, sso,
+      access_token: token.access_token,
+      refresh_token: token.refresh_token || "",
+      expires_at: Date.now() + (token.expires_in || 21600) * 1000,
       created: new Date().toISOString(),
       model_tier: "basic",
+      source: "grok-factory-v2",
     };
     if (registryPath) {
       const reg = fs.existsSync(registryPath) ? JSON.parse(fs.readFileSync(registryPath, "utf8")) : [];
       reg.push(entry);
       fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2));
     }
-    console.log("ACCOUNT_OK " + JSON.stringify({ email, sso: !!sso, anon: !!anon, cookies: cookies.length }));
+    console.log("ACCOUNT_OK " + JSON.stringify({ email, sso: !!sso, token: token.access_token.length }));
     await browser.close();
     process.exit(0);
   } catch (e) {
