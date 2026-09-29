@@ -353,9 +353,12 @@ async function main() {
 
   try {
     const enc = encodeURIComponent(email);
-    // pre-snapshot inbox to skip stale codes (track message IDs)
+    // pre-snapshot inbox to skip stale codes (track message IDs; retry transient list failures)
     const seen = new Set();
-    try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); } catch {}
+    for (let s = 0; s < 3; s++) {
+      try { for (const m of await enatorList(email)) if (m.id || m.subject) seen.add(m.id || m.subject); break; } catch {}
+      await new Promise((r) => setTimeout(r, 2000));
+    }
 
     // ---- 1+2. RESET RAIL + CODE-CATCH with REMINT cycles: xAI queue-delays
 //        code emails (~3min to hours). Poll inbox every 30s, re-trigger send
@@ -440,22 +443,49 @@ async function main() {
     }
     if (!code) { console.error("CODE_TIMEOUT: no code caught in 3 inbox cycles for " + email); process.exit(1); }
     log("code:", code.slice(0, 3) + "-" + code.slice(3));
-    const codeInput = page.locator("input[name=code]:enabled").first();
-    if (await codeInput.count()) await codeInput.fill(code);
-    else {
-      const anyIn = page.locator("input:not([disabled]):not([type=hidden])").last();
-      await anyIn.fill(code).catch(() => {});
+    // ---- submit code (retry once if stale/rejected: re-catch a FRESH code) ----
+    let codeOk = false;
+    for (let attempt = 0; attempt < 2 && !codeOk; attempt++) {
+      if (attempt > 0) {
+        log("previous code rejected — re-entering catch for a fresh code");
+        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+        const t1 = Date.now();
+        code = null;
+        for (let i = 0; i < 18 && !code; i++) {
+          const msgs = await enatorList(email).catch(() => []);
+          for (const m of msgs) {
+            if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
+            const key = m.id || m.subject;
+            if (seen.has(key)) continue;
+            const mm = (m.subject || "").match(/(\d{3})[\s-]*(\d{3})/);
+            if (mm) { seen.add(key); code = mm[1] + mm[2]; break; }
+          }
+          if (code) break;
+          if (i > 0 && i % 6 === 0) {
+            await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+            await page.waitForTimeout(3000);
+          }
+          await new Promise((r) => setTimeout(r, 30000));
+        }
+        if (!code) break;
+        log("fresh code caught in", Math.round((Date.now() - t1) / 1000), "s:", code.slice(0, 3) + "-" + code.slice(3));
+      }
+      const codeInput = page.locator("input[name=code]:enabled").first();
+      if (await codeInput.count()) await codeInput.fill(code);
+      else {
+        const anyIn = page.locator("input:not([disabled]):not([type=hidden])").last();
+        await anyIn.fill(code).catch(() => {});
+      }
+      await page.waitForTimeout(500);
+      const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
+      log("clicked code-continue:", c1);
+      await page.waitForTimeout(7000);
+      b = await bodyText(page);
+      log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
+      codeOk = !/verify your email|enter it below|invalid code/i.test(b);
     }
-    await page.waitForTimeout(500);
-    const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
-    log("clicked code-continue:", c1);
-    await page.waitForTimeout(7000);
-    b = await bodyText(page);
-    log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
-    if (/verify your email|enter it below|invalid code/i.test(b)) {
-      console.error("CODE_REJECTED (expired between catch and submit) — rerun needed for " + email);
-      process.exit(1);
-    }
+    if (!codeOk) throw new Error("CODE_REJECTED_TWICE: no valid code for " + email);
 
     // ---- 3. set new password ----
     if (/password/i.test(b)) {
