@@ -133,7 +133,7 @@ async function bodyText(page) {
 
 async function hasSso(ctx) {
   const cks = await ctx.cookies().catch(() => []);
-  return (cks || []).some((c) => ["sso", "x-userid", "sso-rw"].includes(c.name);
+  return (cks || []).some((c) => ["sso", "x-userid", "sso-rw"].includes(c.name));
 }
 
 function makePassword() {
