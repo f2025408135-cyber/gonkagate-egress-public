@@ -118,10 +118,20 @@ async function clickByText(page, text, { exact = true } = {}) {
 }
 
 async function clickAny(page, labels) {
+  // robust: matches <button>, input[type=submit], [role=button] by innerText OR value,
+  // exact-or-startswith, case-insensitive (consent forms use input[type=submit] value="Allow")
   for (const label of labels) {
     try {
-      const btn = page.locator("button", { hasText: label }).first();
-      if (await btn.count()) { await btn.click({ timeout: 5000 }); return label; }
+      const found = await page.evaluate((lab) => {
+        const els = [...document.querySelectorAll("button, input[type=submit], [role=button]")];
+        const el = els.find((x) => {
+          const t = ((x.innerText || x.value || "").trim().toLowerCase());
+          return t === lab.toLowerCase() || t.startsWith(lab.toLowerCase());
+        });
+        if (el) { el.click(); return true; }
+        return false;
+      }, label);
+      if (found) return label;
     } catch (e) { /* try next */ }
   }
   return null;
@@ -150,35 +160,27 @@ async function deviceFlow(page, ctx, log) {
   const dc = await r.json();
   log("device code OK, user_code:", dc.user_code);
 
-  // verify + consent via the BROWSER's request context (Chrome TLS + browser
-  // cookies → passes Cloudflare; raw node fetch gets a JS challenge)
-  let vtext = "";
-  let vr = await page.request.post(`${AUTH}/oauth2/device/verify`, {
-    form: { user_code: dc.user_code },
-    maxRedirects: 0,
-  });
-  if (vr.status() >= 300 && vr.status() < 400) {
-    const loc = vr.headers()["location"];
-    if (!loc) throw new Error("verify redirect missing location");
-    const cr = await page.request.get(new URL(loc, `${AUTH}/`).toString());
-    vtext = await cr.text();
-  } else {
-    vtext = await vr.text();
+  // consent via REAL PAGE navigation — the browser executes the Cloudflare JS
+  // challenge, which page.request / raw fetch cannot (both get the ie6-oldie
+  // challenge on auth.x.ai/oauth2/device/verify). Real pages render fine.
+  await page.goto(dc.verification_uri_complete, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await page.waitForTimeout(10000);
+  let b = await bodyText(page);
+  log("device page1:", b.replace(/\s+/g, " ").slice(0, 180));
+  const c4 = await clickAny(page, ["continue", "next", "authorize"]);
+  log("device click1:", c4);
+  await page.waitForTimeout(6000);
+  b = await bodyText(page);
+  if (/second factor|verify your account|authenticator app|\bADM\b/i.test(b)) {
+    log("MFA_WALL on consent — cannot complete device flow for MFA'd account");
+    throw new Error("MFA_ACCOUNT");
   }
-  const mct = vtext.match(/name="consent_token" value="([^"]+)"/);
-  if (!mct) {
-    log("NO consent_token in verify response; body sample:", vtext.replace(/\s+/g, " ").slice(0, 220));
-    throw new Error("no consent_token (verify/consent failed)");
-  }
-  log("consent_token captured");
+  const c5 = await clickAny(page, ["allow", "authorize", "approve", "yes", "continue"]);
+  log("device click2:", c5);
+  if (!c5) log("consent page sample:", b.replace(/\s+/g, " ").slice(0, 240));
+  await page.waitForTimeout(5000);
 
-  const ar = await page.request.post(`${AUTH}/oauth2/device/approve`, {
-    form: { user_code: dc.user_code, principal_type: "User", principal_id: "", consent_token: mct[1], action: "allow" },
-    headers: { Origin: "https://accounts.x.ai", Referer: "https://accounts.x.ai/oauth2/device/consent" },
-    maxRedirects: 0,
-  });
-  log("approve status:", ar.status());
-
+  // token poll (node fetch fine here — no CF on /oauth2/token)
   let token = null;
   for (let i =  0; i < 40; i++) {
     const tr = await fetch(`${AUTH}/oauth2/token`, {
@@ -327,6 +329,14 @@ async function main() {
     log("post-password page:", b.replace(/\s+/g, " ").slice(0, 200));
     if (/blocked|authentication failure/i.test(b)) throw new Error("ACCOUNT_BLOCKED: " + email);
     if (/successful|password.*(reset|changed|updated)|sign in|account/i.test(b)) log("PASSWORD SET OK");
+    // MFA bailout: Emailnator pool accounts are mixed — some have TOTP (ADM)
+    // enrolled. The device-flow consent then requires a 2nd factor we cannot
+    // satisfy → skip fast instead of burning the run on a consent timeout.
+    if (/second factor|authenticator app|\bADM\b|contact support/i.test(b)) {
+      console.error("MFA_ACCOUNT: " + email + " has 2FA enrolled — skipping");
+      try { await browser.close(); } catch {}
+      process.exit(3);
+    }
 
     // ---- 4. session: auto via reset OR sign-in fallback ----
     let authed = false;
