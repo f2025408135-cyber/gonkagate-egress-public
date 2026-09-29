@@ -128,7 +128,7 @@ async function clickAny(page, labels) {
 }
 
 async function bodyText(page) {
-  try { return (await page.textContent("body")) || ""; } catch { return ""; }
+  try { return (await page.locator("body").innerText()) || ""; } catch { return ""; }
 }
 
 function hasSso(ctx) {
@@ -176,20 +176,32 @@ async function deviceFlow(page, ctx, log) {
 }
 
 async function main() {
-  let [email, password] = process.argv.slice(2);
+  // robust arg parse: email/password are the FIRST non-flag positionals
   const args = process.argv.slice(2);
-  const headed = args.includes("--headed");
-  const newMode = args.includes("--new");
-  const regIdx = args.indexOf("--registry");
-  const registryPath = regIdx >= 0 ? args[regIdx + 1] : null;
-  const codeIdx = args.indexOf("--code");
-  const manualCode = codeIdx >= 0 ? args[codeIdx + 1] : null;
+  const opts = { registry: null, code: null, headed: false, new: false };
+  const positional = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--registry") { opts.registry = args[++i] || null; }
+    else if (a === "--code") { opts.code = args[++i] || null; }
+    else if (a === "--headed") { opts.headed = true; }
+    else if (a === "--new") { opts.new = true; }
+    else if (a.startsWith("--")) { /* skip unknown flags */ }
+    else positional.push(a);
+  }
+  const emailArg = positional[0] || null;
+  const passwordArg = positional[1] || null;
+  const registryPath = opts.registry;
+  const manualCode = opts.code;
+  const headed = opts.headed;
   const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
-  if (!email || newMode) {
+  let email = emailArg;
+  if (!email || opts.new) {
     email = await enatorGen();
     log("MINTED EMAIL:", email);
   }
+  let password = passwordArg;
   if (!password) {
     password = makePassword();
     log("generated random password (in-run)");
