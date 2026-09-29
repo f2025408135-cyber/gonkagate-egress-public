@@ -103,6 +103,7 @@ async function enatorWaitCode(email, tries = 18, gapMs = 10000, seen = new Set()
       const msgs = await enatorList(email);
       const hit = msgs.find((m) => /x\.ai|SpaceXAI|confirmation code/i.test((m.from || "") + (m.subject || "")) && !seen.has(m.subject));
       if (hit) {
+        seen.add(m.subject); // skip on later retries (stale-code protection)
         const m = (hit.subject || "").match(/(\d{3})[\s-]*(\d{3})/) || (hit.subject || "").match(/(\d{6})/);
         if (m) return m[1] + (m[2] ? m[2] : "");
       }
@@ -150,7 +151,44 @@ function makePassword() {
   return "Grok!" + randomBytes(9).toString("base64url");
 }
 
-async function deviceFlow(page, ctx, log) {
+async function uiLogin(page, ctx, email, password, log) {
+  // full UI sign-in: email → password → turnstile auto-solve → login click.
+  // Used when the reset chain did NOT establish an sso session, or when the
+  // device flow redirects to the login page.
+  log("UI login (email+password+turnstile)");
+  await page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+  await page.waitForTimeout(10000);
+  await clickAny(page, ["login with email"]);
+  await page.waitForTimeout(4000);
+  await page.locator("input[name=email], input[type=email]").first().fill(email);
+  await page.waitForTimeout(500);
+  await clickAny(page, ["next"]);
+  await page.waitForTimeout(6000);
+  await page.locator("input[name=password], input[type=password]").first().fill(password);
+  await page.waitForTimeout(12000); // turnstile auto-solve
+  const c3 = await clickAny(page, ["login"]);
+  log("clicked login:", c3);
+  await page.waitForTimeout(4000);
+  if (!c3) {
+    const r3 = await page.evaluate(`(() => {
+      const els = [...document.querySelectorAll('button, [role=button], input[type=submit]')];
+      const b = els.find(x => (x.innerText || x.value || '').trim().toLowerCase() === 'login');
+      if (b) { b.click(); return 'login-exact2'; }
+      return null;
+    })()`);
+    log("login fallback:", r3);
+  }
+  let ok = false;
+  for (let i = 0; i < 30; i++) {
+    if (await hasSso(ctx)) { ok = true; break; }
+    const u = await page.evaluate("location.href").catch(() => "");
+    if (/grok\.com/.test(String(u))) { ok = true; break; }
+    await page.waitForTimeout(2000);
+  }
+  return ok;
+}
+
+async function deviceFlow(page, ctx, email, password, log) {
   const r = await fetch(`${AUTH}/oauth2/device/code`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -167,6 +205,17 @@ async function deviceFlow(page, ctx, log) {
   await page.waitForTimeout(10000);
   let b = await bodyText(page);
   log("device page1:", b.replace(/\s+/g, " ").slice(0, 180));
+  if (/log into your account|login with google|login with email/i.test(b)) {
+    // no usable sso session — device flow bounced to the login form.
+    // Sign in inline, then re-enter the consent URL.
+    log("device flow hit a LOGIN page — inline UI login, then re-enter consent");
+    const okL = await uiLogin(page, ctx, email, password, log);
+    if (!okL) throw new Error("NO_AUTH: inline login inside device flow failed");
+    await page.goto(dc.verification_uri_complete, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(10000);
+    b = await bodyText(page);
+    log("device page1b:", b.replace(/\s+/g, " ").slice(0, 180));
+  }
   const c4 = await clickAny(page, ["continue", "next", "authorize"]);
   log("device click1:", c4);
 await page.waitForTimeout(6000);
@@ -346,21 +395,44 @@ async function main() {
       log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
     }
 
-    // ---- 2. wait for + enter code ----
-    const code = manualCode || (await enatorWaitCode(email, 18, 10000, seen));
-    if (!code) { console.error("CODE_TIMEOUT: no x.ai mail arrived at " + email); process.exit(1); }
-    log("code:", code.slice(0, 3) + "-" + code.slice(3));
-    const codeInput = page.locator("input[name=code]").first();
-    if (await codeInput.count()) await codeInput.fill(code);
-    else await page.locator("input").last().fill(code);
-    await page.waitForTimeout(500);
-    const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
-    log("clicked code-continue:", c1);
-    await page.waitForTimeout(7000);
+    // ---- 2. wait for + enter code (retry loop: stale/slow/absent codes) ----
+    let code = null;
+    let codeOk = false;
+    for (let attempt = 1; attempt <= 3 && !codeOk; attempt++) {
+      code = manualCode || (await enatorWaitCode(email, attempt === 1 ? 30 : 12, 10000, seen));
+      if (!code) {
+        log("code wait timed out (attempt " + attempt + ") — resending");
+        await clickAny(page, ["resend", "send again", "resend code"]);
+        await page.waitForTimeout(4000);
+        if (!/verify your email/i.test(await bodyText(page))) {
+          await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+          await page.waitForTimeout(8000);
+        }
+        continue;
+      }
+      log("code:", code.slice(0, 3) + "-" + code.slice(3));
+      const codeInput = page.locator("input[name=code]").first();
+      if (await codeInput.count()) await codeInput.fill(code);
+      else await page.locator("input").last().fill(code);
+      await page.waitForTimeout(500);
+      const c1 = await clickAny(page, ["continue", "confirm email", "verify"]);
+      log("clicked code-continue:", c1);
+      await page.waitForTimeout(7000);
+      b = await bodyText(page);
+      log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
+      if (!/verify your email|enter it below|invalid code/i.test(b)) { codeOk = true; break; }
+      log("code not accepted / page stuck on verify (attempt " + attempt + ") — resend + retry");
+      const rc = await clickAny(page, ["resend", "send again", "resend code"]);
+      log("resend click:", rc);
+      await page.waitForTimeout(4000);
+      if (!rc) {
+        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await page.waitForTimeout(8000);
+      }
+    }
+    if (!codeOk) { console.error("CODE_TIMEOUT: no valid x.ai code for " + email); process.exit(1); }
 
     // ---- 3. set new password ----
-    b = await bodyText(page);
-    log("after code:", b.replace(/\s+/g, " ").slice(0, 200));
     if (/password/i.test(b)) {
       const pws = await page.locator("input[type=password]").count();
       await page.locator("input[type=password]").nth(0).fill(password);
@@ -391,40 +463,13 @@ async function main() {
     }
     if (!authed) {
       log("no sso after reset — doing sign-in");
-      await page.goto("https://accounts.x.ai/sign-in?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForTimeout(10000);
-      await clickAny(page, ["login with email"]);
-      await page.waitForTimeout(4000);
-      await page.locator("input[name=email], input[type=email]").first().fill(email);
-      await page.waitForTimeout(500);
-      await clickAny(page, ["next"]);
-      await page.waitForTimeout(6000);
-      await page.locator("input[name=password], input[type=password]").first().fill(password);
-      await page.waitForTimeout(12000); // turnstile auto-solve
-      const c3 = await clickAny(page, ["login"]);
-      log("clicked login:", c3);
-      await page.waitForTimeout(4000);
-      if (!c3) {
-        const r3 = await page.evaluate(`(() => {
-          const els = [...document.querySelectorAll('button, [role=button], input[type=submit]')];
-          const b = els.find(x => (x.innerText || x.value || '').trim().toLowerCase() === 'login');
-          if (b) { b.click(); return 'login-exact2'; }
-          return null;
-        })()`);
-        log("login fallback:", r3);
-      }
-      for (let i = 0; i < 30; i++) {
-        if (await hasSso(ctx)) { authed = true; break; }
-        const u = await page.evaluate("location.href").catch(() => "");
-        if (/grok\.com/.test(String(u))) { authed = true; break; }
-        await page.waitForTimeout(2000);
-      }
+      authed = await uiLogin(page, ctx, email, password, log);
     }
     log("authed:", authed);
     if (!authed) throw new Error("NO_AUTH: sign-in did not establish a session for " + email);
 
     // ---- 5. device-flow OAuth mint ----
-    const token = await deviceFlow(page, ctx, log);
+    const token = await deviceFlow(page, ctx, email, password, log);
     log("TOKEN OK access:", token.access_token.length, "refresh:", token.refresh_token ? token.refresh_token.length : 0, "expires_in:", token.expires_in);
 
     // ---- 6. registry ----
