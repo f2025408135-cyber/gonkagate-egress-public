@@ -275,8 +275,11 @@ await page.waitForTimeout(6000);
   if (!completed) log("CONSENT_INCOMPLETE — polling anyway (grant may still register)");
 
   // token poll (node fetch fine here — no CF on /oauth2/token)
+  // Hardened: 90×5s = 7.5 min; every ~30s re-visit the consent URL and re-click
+  // allow — the approve POST occasionally races/fails silently, leaving the grant
+  // unregistered while the page sits on "Authorize". Re-click re-submits.
   let token = null;
-  for (let i =  0; i < 60; i++) {
+  for (let i = 0; i < 90; i++) {
     const tr = await fetch(`${AUTH}/oauth2/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -284,7 +287,23 @@ await page.waitForTimeout(6000);
     });
     const j = await tr.json().catch(() => ({}));
     if (j.access_token) { token = j; break; }
-    if (j.error === "authorization_pending") { await new Promise((r) => setTimeout(r, 5000)); continue; }
+    if (j.error === "authorization_pending") {
+      if (i > 0 && i % 6 === 0) {
+        // ~every 30s: re-check consent page; if still showing an authorize/allow
+        // control, click it again (idempotent re-approve)
+        try {
+          await page.goto(dc.verification_uri_complete, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(4000);
+          const rb = await bodyText(page);
+          if (!/you can close this window|approved|successful|complete/i.test(rb)) {
+            const rc = await clickAny(page, ["allow", "authorize", "approve"]);
+            if (rc) log("token-poll re-click consent:", rc);
+          }
+        } catch (e) { /* poll continues regardless */ }
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
     if (j.error === "slow_down") { await new Promise((r) => setTimeout(r, 7000)); continue; }
     throw new Error("token poll: " + JSON.stringify(j));
   }
@@ -564,12 +583,16 @@ async function main() {
     log("post-password page:", b.replace(/\s+/g, " ").slice(0, 200));
     if (/blocked|authentication failure/i.test(b)) throw new Error("ACCOUNT_BLOCKED: " + email);
     if (/successful|password.*(reset|changed|updated)|sign in|account/i.test(b)) log("PASSWORD SET OK");
-    // MFA note: emailnator dotGmail pool = PRE-REGISTERED xAI accounts, many with
-    // 2FA enrolled (Google Authenticator / KeePassDX / ADM). The sso cookie IS set
-    // by the reset chain — so the OAuth device consent MAY still proceed without a
-    // 2nd factor. Do NOT bail; log and continue so we learn the consent behavior.
-    if (/second factor|authenticator app|\bADM\b|contact support/i.test(b)) {
-      log("MFA DETECTED (2FA enrolled: " + email + ") — continuing to device flow to test sso-consent bypass");
+    // EARLY-ABORT: the post-password page showing a 2FA challenge ("You must provide
+    // a second factor ... Google Verify / Use recovery code") means the account has
+    // 2FA enrolled → the OAuth consent page will ALWAYS demand the same step-up
+    // (verified: every wave-3 wall'd run showed this exact challenge here first, and
+    // no run with the clean ACCOUNT page ever hit the consent wall — the old
+    // "MFA DETECTED + sso-bypass" hypothesis was a footer "Contact Support" false
+    // positive). Abort fast instead of burning the device-flow + consent + poll.
+    if (/must provide a second factor/i.test(b)) {
+      console.error("MFA_ACCOUNT_EARLY: post-password 2FA challenge for " + email);
+      process.exit(3);
     }
 
     // ---- 4. session: auto via reset OR sign-in fallback ----
