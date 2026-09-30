@@ -303,6 +303,7 @@ async function main() {
     else if (a === "--code") { opts.code = args[++i] || null; }
     else if (a === "--headed") { opts.headed = true; }
     else if (a === "--new") { opts.new = true; }
+    else if (a === "--signup-first") { opts.signupFirst = true; }
     else if (a.startsWith("--")) { /* skip unknown flags */ }
     else positional.push(a);
   }
@@ -311,6 +312,7 @@ async function main() {
   const registryPath = opts.registry;
   const manualCode = opts.code;
   const headed = opts.headed;
+  const signupFirst = opts.signupFirst || false;
   const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
   let email = emailArg;
@@ -375,6 +377,7 @@ async function main() {
 //        spam-files xAI mail) → abandon after ~9min and remint a fresh inbox. ----
     let code = null;
     let b = "";
+    let signupMode = signupFirst; // signup rail: fresh accounts have NO MFA wall
     for (let cycle = 1; cycle <= 3 && !code; cycle++) {
       if (cycle > 1) {
         email = await enatorGen();
@@ -385,42 +388,69 @@ async function main() {
         await page.goto("https://accounts.x.ai/", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
         await page.waitForTimeout(2000);
       }
-      // ---- reset rail ----
-      await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-      await page.waitForTimeout(10000);
-      b = await bodyText(page);
-      log("reset page:", b.replace(/\s+/g, " ").slice(0, 160));
-      if (/you have been blocked|attention required/i.test(b)) { console.error("BLOCKED: Cloudflare block page"); process.exit(4); }
-      if (/too many code requests/i.test(b)) {
-        log("RATE_LIMITED — waiting 60s then retrying send");
-        await page.waitForTimeout(60000);
-        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await page.waitForTimeout(10000);
-        b = await bodyText(page);
-        log("reset page after wait:", b.replace(/\s+/g, " ").slice(0, 160));
-      }
-      if (/no account|doesn't exist|not found|invalid email/i.test(b)) {
-        log("EMAIL NOT REGISTERED — doing signup step first");
+      // ---- SIGNUP-FIRST: submit signup; if already-registered → reset rail ----
+      let codeSent = false;
+      if (signupMode) {
+        log("SIGNUP-FIRST: submitting signup for " + email);
         await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
-        await page.waitForTimeout(10000);
+        await page.waitForTimeout(6000);
         await clickAny(page, ["sign up with email"]);
         await page.waitForTimeout(3000);
-        await page.locator("input[type=email], input[name=email]").first().fill(email);
-        await page.waitForTimeout(500);
-        await clickAny(page, ["sign up"]);
-        await page.waitForTimeout(8000);
+        const mi = page.locator("input[type=email], input[name=email]").first();
+        if (await mi.count()) {
+          await mi.fill(email);
+          await page.waitForTimeout(400);
+          await mi.press("Enter").catch(() => {});
+        }
+        await page.waitForTimeout(10000);
+        b = await bodyText(page);
+        log("signup page after submit:", b.replace(/\s+/g, " ").slice(0, 160));
+        if (/verify your email|we've emailed|confirmation code|code to/i.test(b)) {
+          codeSent = true; log("SIGNUP: code page — waiting for code in inbox");
+        } else if (/already|exists|in use|sign in instead/i.test(b)) {
+          log("SIGNUP: already registered — falling back to reset rail"); signupMode = false;
+        } else {
+          log("SIGNUP: unknown state — will still try catch"); codeSent = true;
+        }
+      }
+      // ---- reset rail (skipped when signup already sent the code) ----
+      if (!codeSent) {
         await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
         await page.waitForTimeout(10000);
         b = await bodyText(page);
-        log("reset page after signup:", b.replace(/\s+/g, " ").slice(0, 160));
-      }
-      // if it didn't auto-send (turnstile gating), click the send button
-      if (!/verify your email|code/i.test(b)) {
-        const c = await clickAny(page, ["reset password", "send reset code", "send code", "continue"]);
-        log("trigger send click:", c);
-        await page.waitForTimeout(8000);
-        b = await bodyText(page);
-        log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
+        log("reset page:", b.replace(/\s+/g, " ").slice(0, 160));
+        if (/you have been blocked|attention required/i.test(b)) { console.error("BLOCKED: Cloudflare block page"); process.exit(4); }
+        if (/too many code requests/i.test(b)) {
+          log("RATE_LIMITED — waiting 60s then retrying send");
+          await page.waitForTimeout(60000);
+          await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+          await page.waitForTimeout(10000);
+          b = await bodyText(page);
+          log("reset page after wait:", b.replace(/\s+/g, " ").slice(0, 160));
+        }
+        if (/no account|doesn't exist|not found|invalid email/i.test(b)) {
+          log("EMAIL NOT REGISTERED — doing signup step first");
+          await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 });
+          await page.waitForTimeout(10000);
+          await clickAny(page, ["sign up with email"]);
+          await page.waitForTimeout(3000);
+          await page.locator("input[type=email], input[name=email]").first().fill(email);
+          await page.waitForTimeout(500);
+          await clickAny(page, ["sign up"]);
+          await page.waitForTimeout(8000);
+          await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 });
+          await page.waitForTimeout(10000);
+          b = await bodyText(page);
+          log("reset page after signup:", b.replace(/\s+/g, " ").slice(0, 160));
+        }
+        // if it didn't auto-send (turnstile gating), click the send button
+        if (!/verify your email|code/i.test(b)) {
+          const c = await clickAny(page, ["reset password", "send reset code", "send code", "continue"]);
+          log("trigger send click:", c);
+          await page.waitForTimeout(8000);
+          b = await bodyText(page);
+          log("reset page after click:", b.replace(/\s+/g, " ").slice(0, 160));
+        }
       }
 
       // ---- code-catch (per inbox, bounded ~9 min / 3 sends) ----
@@ -429,8 +459,18 @@ async function main() {
       let sends = 0;
       const triggerSend = async () => {
         sends++;
-        log("re-trigger reset send #" + sends);
-        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        if (signupMode) {
+          log("re-trigger SIGNUP send #" + sends);
+          await page.goto("https://accounts.x.ai/sign-up?redirect=grok-com", { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+          await page.waitForTimeout(5000);
+          await clickAny(page, ["sign up with email"]);
+          await page.waitForTimeout(2500);
+          const mi2 = page.locator("input[type=email], input[name=email]").first();
+          if (await mi2.count()) { await mi2.fill(email); await mi2.press("Enter").catch(() => {}); }
+        } else {
+          log("re-trigger reset send #" + sends);
+          await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        }
         await page.waitForTimeout(3000);
       };
       await triggerSend();
@@ -438,8 +478,13 @@ async function main() {
       for (let i = 0; i < 18; i++) { // 30s ticks, ~9 min per inbox
         const msgs = await enatorList(email).catch(() => []);
         for (const m of msgs) {
-          if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
-          const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
+          const sub = m.subject || "";
+          if (signupMode && sub) log("  inbox:", sub.slice(0, 80));
+          if (!/SpaceXAI confirmation code/i.test(sub)) {
+            // signup-mode greedy: any code-ish subject carrying a 3-3 split code
+            if (!(signupMode && /code|verify|confirmation/i.test(sub) && /(\d{3})[\s-](\d{3})/.test(sub))) continue;
+          }
+          const mm = sub.match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/) || sub.match(/(\d{3})[\s-](\d{3})/);
           if (!mm) continue;
           const cv = mm[1] + mm[2];
           if (seen.has(cv)) continue;
@@ -460,16 +505,19 @@ async function main() {
     for (let attempt = 0; attempt < 4 && !codeOk; attempt++) {
       if (attempt > 0) {
         log("previous code rejected — re-entering catch for a fresh code");
-        await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-        await page.waitForTimeout(3000);
+        await triggerSend();
         const t1 = Date.now();
         const warmUntil = Date.now() + 60000;
         code = null;
         for (let i = 0; i < 18 && !code; i++) {
           const msgs = await enatorList(email).catch(() => []);
           for (const m of msgs) {
-            if (!/SpaceXAI confirmation code/i.test(m.subject || "")) continue;
-            const mm = (m.subject || "").match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/);
+            const sub = m.subject || "";
+            if (signupMode && sub) log("  inbox:", sub.slice(0, 80));
+            if (!/SpaceXAI confirmation code/i.test(sub)) {
+              if (!(signupMode && /code|verify|confirmation/i.test(sub) && /(\d{3})[\s-](\d{3})/.test(sub))) continue;
+            }
+            const mm = sub.match(/SpaceXAI confirmation code:\s*(\d{3})[\s-]*(\d{3})/) || sub.match(/(\d{3})[\s-](\d{3})/);
             if (!mm) continue;
             const cv = mm[1] + mm[2];
             if (seen.has(cv)) continue;
@@ -479,8 +527,7 @@ async function main() {
           }
           if (code) break;
           if (i > 0 && i % 6 === 0) {
-            await page.goto(`https://accounts.x.ai/reset-password?email=${enc}`, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
-            await page.waitForTimeout(3000);
+            await triggerSend();
           }
           await new Promise((r) => setTimeout(r, 30000));
         }
@@ -509,7 +556,7 @@ async function main() {
       await page.locator("input[type=password]").nth(0).fill(password);
       if (pws >= 2) await page.locator("input[type=password]").nth(1).fill(password);
       await page.waitForTimeout(500);
-      const c2 = await clickAny(page, ["reset password", "save password", "continue", "submit"]);
+      const c2 = await clickAny(page, ["reset password", "create account", "save password", "continue", "submit"]);
       log("clicked password-save:", c2);
       await page.waitForTimeout(8000);
     }

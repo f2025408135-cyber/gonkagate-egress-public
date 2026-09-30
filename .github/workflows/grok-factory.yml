@@ -17,6 +17,10 @@ on:
         description: "temp email (optional — runner mints a fresh dotGmail from its own IP when omitted)"
         required: false
         type: string
+      extra_args:
+        description: "extra factory args (e.g. --signup-first)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -42,7 +46,9 @@ jobs:
         run: |
           EMAIL_ARG=""
           if [ -n "${{ github.event.inputs.email }}" ]; then EMAIL_ARG="${{ github.event.inputs.email }}"; fi
-          node scripts/grok-factory.mjs $EMAIL_ARG --registry scripts/.tmp-grok-registry.json
+          EXTRA_ARG=""
+          if [ -n "${{ github.event.inputs.extra_args }}" ]; then EXTRA_ARG="${{ github.event.inputs.extra_args }}"; fi
+          node scripts/grok-factory.mjs $EMAIL_ARG $EXTRA_ARG --registry scripts/.tmp-grok-registry.json
 
       - name: Envelope-encrypt runner results (ciphertext only)
         run: node scripts/grok-enc.mjs scripts/.tmp-grok-registry.json
