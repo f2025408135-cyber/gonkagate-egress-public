@@ -1,0 +1,23 @@
+# zai-mint-recon — probe z.ai Aliyun captcha scene policy (auth=36qgs6xb embed, chat=didk33e0 popup)
+# from a FRESH runner IP. If the auth scene returns a silent param, attempts a real signup.
+# Public-safe: no secrets, no writes.
+name: zai-mint-recon
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run z.ai mint recon
+        run: node scripts/zai-mint-recon.mjs
