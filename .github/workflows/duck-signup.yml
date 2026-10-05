@@ -1,0 +1,57 @@
+# DuckDuckGo Email Protection signup on a fresh runner IP — PUBLIC repo.
+# Output is ENVELOPE-ENCRYPTED (AES-256-GCM + RSA-4096 ddg-public.pem) before commit.
+# Only the local holder of private/ddg-private.pem (never committed) can decrypt.
+name: duck-signup
+
+on:
+  workflow_dispatch:
+    inputs:
+      duckname:
+        description: duck address name (optional)
+        required: false
+        default: ""
+      fwd:
+        description: forwarding email
+        required: false
+        default: "anonysusarchiver@gmail.com"
+
+permissions:
+  contents: write
+
+jobs:
+  signup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install playwright + chromium
+        run: |
+          npm i playwright@1.63.0 --no-save
+          npx playwright install --with-deps chromium
+
+      - name: Extract DuckDuckGo extension
+        run: tar -xzf assets/ddg-ext.tar.gz
+
+      - name: Run duck signup (fresh egress IP)
+        env:
+          DUCKNAME: ${{ github.event.inputs.duckname }}
+          DDGFWD: ${{ github.event.inputs.fwd }}
+          GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+          RUN_ID: ${{ github.run_id }}
+        run: xvfb-run -a -s "-screen 0 1440x1000x24" node scripts/duck-signup-runner.mjs
+
+      - name: Commit encrypted results (ciphertext only)
+        run: |
+          git config user.name "duck-worker"
+          git config user.email "worker@localhost"
+          git add -A
+          git commit -m "duck: encrypted result $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "nothing to commit"
+          git pull --rebase 2>/dev/null || true
+          git push

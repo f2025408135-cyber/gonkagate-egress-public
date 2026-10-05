@@ -3,4 +3,9 @@ scripts/*.jsonl
 scripts/*.md
 scripts/.tmp-registry.json
 scripts/.tmp-grok-registry.json
+scripts/duck-result-*.json
 *.log
+# duck runner session data / extracted extension (plaintext cookies MUST never be committed)
+duck-profile-runner/
+ddg-ext/
+tmp/
