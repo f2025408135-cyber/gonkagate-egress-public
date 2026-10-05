@@ -75,6 +75,7 @@ await ctx.addInitScript(`Object.defineProperty(navigator,'webdriver',{get:()=>un
 const page = ctx.pages()[0] || await ctx.newPage();
 page.setDefaultTimeout(25000);
 const state = async () => await page.evaluate(() => ({ url: location.href, body: (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').slice(0, 800) })).catch(e => ({ err: String(e).slice(0, 100) }));
+const fullBody = async () => await page.evaluate(() => (document.body ? document.body.innerText : '').replace(/\s+/g, ' ')).catch(() => '');
 const shotB64 = async (p) => { try { const b = await page.screenshot({ timeout: 15000 }); return b.toString('base64'); } catch { return null; } };
 const grab = async (name) => { try { return { name, b64: await shotB64() }; } catch { return null; } };
 
@@ -217,6 +218,7 @@ try {
         result.swUrl = sw.url();
         result.extStorage = await sw.evaluate(() => new Promise((res) => chrome.storage.local.get(null, (v) => res(v))));
         log('extStorage keys:', Object.keys(result.extStorage || {}).join(','));
+        try { result.extSync = await sw.evaluate(() => new Promise((res) => chrome.storage.sync.get(null, (v) => res(v)))); log('extSync keys:', Object.keys(result.extSync || {}).join(',')); } catch {}
       } else { log('no service worker found'); }
     } catch (e) { log('sw err', String(e).slice(0, 120)); }
 
@@ -226,8 +228,9 @@ try {
       await page.waitForTimeout(7000);
       const s0 = await state();
       log('settings:', JSON.stringify(s0).slice(0, 400));
-      result.settingsText = s0.body;
-      const addrs = new Set((s0.body.match(/[a-z0-9]{5,30}@duck\.com/gi) || []).map(a => a.toLowerCase()));
+      const s0txt = await fullBody();
+      result.settingsText = s0txt.slice(0, 5000);
+      const addrs = new Set((s0txt.match(/[a-z0-9]{5,30}@duck\.com/gi) || []).map(a => a.toLowerCase()));
       // click generate-like buttons up to 8 times
       for (let i = 0; i < 8; i++) {
         const clicked = await page.evaluate(() => {
@@ -237,8 +240,8 @@ try {
         if (!clicked) break;
         log('gen click:', clicked);
         await page.waitForTimeout(3500);
-        const s = await state();
-        for (const a of (s.body.match(/[a-z0-9]{5,30}@duck\.com/gi) || [])) addrs.add(a.toLowerCase());
+        const s = await fullBody();
+        for (const a of (s.match(/[a-z0-9]{5,30}@duck\.com/gi) || [])) addrs.add(a.toLowerCase());
       }
       result.generated = [...addrs];
       log('addresses seen:', result.generated.length);
