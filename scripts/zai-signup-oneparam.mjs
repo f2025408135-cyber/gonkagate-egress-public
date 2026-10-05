@@ -9,6 +9,8 @@ const pass = process.env.ZPASS || "Qq9Wm4Kx2Zp7Lr8s";
 
 async function main() {
   try { const j = await (await fetch("https://api.ipify.org?format=json")).json(); log({ runnerIp: j.ip }); } catch (e) { log({ ipErr: String(e).slice(0, 100) }); }
+  const { createHash } = await import("node:crypto");
+  log({ paramLen: param ? param.length : 0, paramHead: param ? param.slice(0, 24) : null, paramTail: param ? param.slice(-16) : null, paramSha: param ? createHash("sha256").update(param).digest("hex").slice(0, 24) : null });
   const H = { "User-Agent": UA, "Content-Type": "application/json", Accept: "application/json", Origin: "https://chat.z.ai", Referer: "https://chat.z.ai/auth" };
   for (let i = 1; i <= 4; i++) {
     try {
