@@ -1,0 +1,13 @@
+name: ip-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe signup endpoint
+        run: |
+          code=$(curl -s -o /tmp/out.html -w "%{http_code}" -X POST https://chat.z.ai/api/v1/auths/signup -H 'Content-Type: application/json' -d '{"name":"P","email":"gha-probe-'$RANDOM'@duck.com","password":"Qq9Wm4Kx2Zp7Lr8s","captcha_verify_param":"probe"}')
+          echo "STATUS:$code"
+          echo "--- body head ---"
+          head -c 400 /tmp/out.html
+          echo
