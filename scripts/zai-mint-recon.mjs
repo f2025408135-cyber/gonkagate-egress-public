@@ -175,4 +175,6 @@ async function main() {
   }
 }
 
-main().catch((e) => { log({ fatal: String(e.stack || e.message).slice(0, 500) }); process.exit(0) });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => { log({ fatal: String(e.stack || e.message).slice(0, 500) }); process.exit(0) });
