@@ -52,7 +52,7 @@ async function describe(file, promptText) {
   }
   return null;
 }
-const isDuck = (desc) => /\b(duck|duckling|mallard|ducklings)\b/i.test(desc || '');
+const isDuck = (desc) => /\bducks?\b|\bducklings?\b|\bmallards?\b/i.test(desc || '');
 
 function encryptEnvelope(plaintext) {
   const aesKey = randomBytes(32);
@@ -131,6 +131,12 @@ try {
     result.shots = [await grab('patience')].filter(Boolean);
     throw new Error('throttled-patience');
   }
+  if (/one-time passphrase|check your inbox/i.test(afterChoose.body || '')) {
+    result.reason = 'email-passphrase-variant';
+    try { result.storageState = await ctx.storageState().catch(() => null); } catch {}
+    result.shots = [await grab('passphrase-screen')].filter(Boolean);
+    throw new Error('email-passphrase-variant');
+  }
 
   if (/\/email\/review/.test(page.url())) {
     await page.evaluate(() => { const b = [...document.querySelectorAll('a,button')].find(x => /this is correct/i.test((x.innerText || '').trim())); if (b) b.click(); }).catch(() => {});
@@ -145,10 +151,19 @@ try {
     throw new Error('throttled-patience');
   }
 
-  // --- captcha loop (up to 3 rounds) ---
-  for (let round = 0; round < 3; round++) {
-    const n = await page.evaluate(() => document.querySelectorAll('input[name="selectedTiles[]"]').length).catch(() => 0);
-    if (!n) { log('no captcha tiles — moving on'); break; }
+  // --- captcha loop (up to 4 rounds) ---
+  for (let round = 0; round < 4; round++) {
+    let n = await page.evaluate(() => document.querySelectorAll('input[name="selectedTiles[]"]').length).catch(() => 0);
+    if (!n) {
+      // a failed round shows a "Try again" gate before the next puzzle appears
+      const clickedTry = await page.evaluate(() => { const b = [...document.querySelectorAll('button,a')].find(x => /^try again$/i.test((x.innerText || '').trim())); if (b) { b.click(); return true; } return false; }).catch(() => false);
+      if (clickedTry) {
+        log('clicked Try again');
+        await page.waitForTimeout(6500);
+        n = await page.evaluate(() => document.querySelectorAll('input[name="selectedTiles[]"]').length).catch(() => 0);
+      }
+      if (!n) { log('no captcha tiles — moving on'); break; }
+    }
     log('captcha round', round, 'tiles', n);
     const tiles = await page.evaluate(() => [...document.querySelectorAll('input[name="selectedTiles[]"]')].map(cb => { const lab = cb.closest('label'); const img = lab ? lab.querySelector('img') : null; return { val: cb.value, src: img ? img.src : null }; }));
     const ducks = [];
@@ -199,11 +214,14 @@ try {
     if (!/bot|puzzle|try again/i.test(afterSubmit.body || '')) break;
   }
 
+  await page.waitForTimeout(6000);
   const fin = await state();
   log('FINAL:', JSON.stringify(fin));
   result.finalState = fin;
-  // success = left the captcha/choose-address and no throttle/bot text
-  const ok = !/choose-address|patience please|bot|puzzle/i.test((fin.url || '') + ' ' + (fin.body || ''));
+  // success = POSITIVE signal and no failure text anywhere
+  const blob = (fin.url || '') + ' ' + (fin.body || '');
+  const bad = /choose-address|patience please|try again|not quite right|attempts? left|bot|puzzle/i.test(blob);
+  const ok = !bad && (/welcome|settings|complete|success/i.test(fin.url || '') || /@duck\.com/i.test(fin.body || ''));
   result.ok = ok;
   result.reason = ok ? 'success' : (result.reason || 'did-not-advance');
 
