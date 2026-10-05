@@ -1,0 +1,38 @@
+# zai-signup-oneparam — POST a locally-solved Aliyun param to z.ai signup from a fresh runner IP.
+# Answers: (1) does the param cross IPs? (2) does a fresh runner IP bypass the EMAIL_DOMAIN_BLOCKED wall?
+name: zai-signup-oneparam
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        required: true
+      param_b64:
+        required: true
+      name:
+        required: false
+        default: "Ava Chen"
+      password:
+        required: false
+        default: "Qq9Wm4Kx2Zp7Lr8s"
+
+permissions:
+  contents: read
+
+jobs:
+  signup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Signup with pre-solved param
+        env:
+          ZEMAIL: ${{ inputs.email }}
+          ZPARAM_B64: ${{ inputs.param_b64 }}
+          ZNAME: ${{ inputs.name }}
+          ZPASS: ${{ inputs.password }}
+        run: node scripts/zai-signup-oneparam.mjs
